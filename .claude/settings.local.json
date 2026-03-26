@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter pub get)",
+      "Bash(flutter analyze)",
+      "Bash(dart pub global activate flutterfire_cli)",
+      "Bash($HOME/.pub-cache/bin/flutterfire configure --project=storeordering-10125)",
+      "Read(//Users/gurmeet/Library/Caches/pub/**)",
+      "Read(//Users/gurmeet/.pub-cache/bin/**)",
+      "Read(//Users/gurmeet/**)"
+    ]
+  }
+}

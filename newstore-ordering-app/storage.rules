@@ -1,0 +1,14 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // POS imports — open access for now (tighten after testing)
+    match /pos-imports/{allPaths=**} {
+      allow read, write: if true;
+    }
+    // Product images for Shopify — must be publicly readable
+    match /product-images/{allPaths=**} {
+      allow read: if true;
+      allow write: if true;
+    }
+  }
+}

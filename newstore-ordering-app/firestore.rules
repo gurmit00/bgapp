@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Settings — open for now (tighten after testing)
+    match /settings/{document=**} {
+      allow read, write: if true;
+    }
+    // Stores and all nested data
+    match /stores/{document=**} {
+      allow read, write: if true;
+    }
+    // Orders
+    match /orders/{document=**} {
+      allow read, write: if true;
+    }
+    // Users
+    match /users/{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

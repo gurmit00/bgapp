@@ -1,0 +1,344 @@
+
+══════════════════════════════════════════════════════════════════════
+                      APNI ROOTS — EXECUTIVE SUMMARY
+              Unified Grocery Store Management Platform
+══════════════════════════════════════════════════════════════════════
+
+Prepared by: Gurmeet (Owner & Technical Lead)
+Date: March 23, 2026
+Status: LIVE — https://storeordering-10125.web.app
+──────────────────────────────────────────────────────────────────────
+
+
+1. WHAT IS THIS?
+════════════════
+
+A custom-built web application that connects our THREE business
+systems into ONE unified management platform:
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │                                                             │
+  │   📱 APNI ROOTS APP (Firebase — our central hub)           │
+  │   ├── Product management                                    │
+  │   ├── Vendor ordering                                       │
+  │   ├── Store inventory                                       │
+  │   └── Label printing queue                                  │
+  │         │                          │                        │
+  │         ▼                          ▼                        │
+  │   🏪 PENNY LANE POS          🛒 SHOPIFY                   │
+  │   (In-Store Register)         (apniroots.com)              │
+  │   ├── Tax codes               ├── Online prices             │
+  │   ├── Store prices             ├── Product images            │
+  │   ├── Departments              ├── Tags & collections        │
+  │   └── Barcodes/SKUs           └── Inventory sync            │
+  │                                                             │
+  └─────────────────────────────────────────────────────────────┘
+
+
+2. THE BUSINESS PROBLEM WE SOLVED
+══════════════════════════════════
+
+BEFORE (manual, error-prone):
+  • Product info scattered across 3 systems
+  • Tax mismatches between POS and Shopify
+  • Prices updated in one place, forgotten in another
+  • No easy way to see "is this product set up everywhere?"
+  • Ordering from vendors done on paper or memory
+  • Shelf labels requested verbally, often forgotten
+
+AFTER (unified, automated):
+  • One screen shows product status across ALL systems
+  • Tax mismatches detected instantly with red alerts
+  • Split pricing is intentional and tracked
+  • Real-time POS + Shopify lookup on every product
+  • Digital vendor ordering with history
+  • Label queue system — tap a button, label gets printed
+
+
+3. SYSTEM ARCHITECTURE
+══════════════════════
+
+  ┌──────────────┐     ┌─────────────────────┐     ┌──────────────┐
+  │              │     │                     │     │              │
+  │  PENNY LANE  │     │   FIREBASE CLOUD    │     │   SHOPIFY    │
+  │    POS       │     │   (Google Cloud)     │     │  apniroots   │
+  │              │     │                     │     │   .com       │
+  │  Windows PC  │     │  ┌───────────────┐  │     │              │
+  │  at store    │◄────│  │  Firestore DB │  │────►│  Online      │
+  │              │     │  │  (products,   │  │     │  Store       │
+  │  PLU.csv     │────►│  │   orders,     │  │     │              │
+  │  (product    │     │  │   vendors,    │  │     │  Products,   │
+  │   database)  │     │  │   stores)     │  │     │  images,     │
+  │              │     │  └───────────────┘  │     │  prices,     │
+  │  NewCodes.txt│◄────│                     │     │  inventory   │
+  │  (updates)   │     │  ┌───────────────┐  │     │              │
+  │              │     │  │  Cloud Run    │  │     │              │
+  │              │     │  │  Sync Proxy   │──│────►│  Shopify     │
+  │              │     │  │  (API bridge) │◄─│─────│  Admin API   │
+  │              │     │  └───────────────┘  │     │              │
+  │              │     │                     │     │              │
+  │              │     │  ┌───────────────┐  │     │              │
+  │              │     │  │  Hosting      │  │     │              │
+  │              │     │  │  (Web App)    │  │     │              │
+  │              │     │  └───────────────┘  │     │              │
+  └──────────────┘     └─────────────────────┘     └──────────────┘
+
+  URL: https://storeordering-10125.web.app
+  Proxy: https://sync-proxy-111416353624.us-central1.run.app
+
+
+4. KEY FEATURES — PRODUCT HUB
+══════════════════════════════
+
+The "Product Hub" is the heart of the app. When you open any
+product, the system AUTOMATICALLY:
+
+  ┌──────────────────────────────────────────────────────┐
+  │  STEP 1: HYDRATION (happens in parallel, ~2 sec)    │
+  │                                                      │
+  │  ┌─────────────┐         ┌─────────────────────┐    │
+  │  │ Look up SKU │         │ Look up SKU via     │    │
+  │  │ in PLU.csv  │         │ Cloud Run Proxy →   │    │
+  │  │ (POS data)  │         │ Shopify GraphQL API │    │
+  │  └──────┬──────┘         └──────────┬──────────┘    │
+  │         │                           │                │
+  │         ▼                           ▼                │
+  │  ┌──────────────────────────────────────────────┐    │
+  │  │         CONFLICT DETECTION ENGINE            │    │
+  │  │                                              │    │
+  │  │  • Tax mismatch? → 🔴 CRITICAL ALERT        │    │
+  │  │  • Price different? → 🟡 INFO (intentional)  │    │
+  │  │  • Name mismatch? → 🟠 WARNING               │    │
+  │  │  • Missing from system? → 🔴 NOT FOUND       │    │
+  │  └──────────────────────────────────────────────┘    │
+  │                                                      │
+  │  STEP 2: DISPLAY unified product card                │
+  │                                                      │
+  │  ┌─ Status Bar ─────────────────────────────────┐    │
+  │  │  ✅ POS ✓  ·  Shopify ✓           1 note 🔄 │    │
+  │  └──────────────────────────────────────────────┘    │
+  │  ┌─ Alert ──────────────────────────────────────┐    │
+  │  │  🔴 TAX MISMATCH: POS=Non-Taxable,          │    │
+  │  │     Shopify=Taxable                          │    │
+  │  └──────────────────────────────────────────────┘    │
+  │  ┌─ Product Image ─────────────────────────────┐    │
+  │  │  [Shopify image]  apniroots.com IMAGE SOURCE │    │
+  │  └──────────────────────────────────────────────┘    │
+  │  ┌─ Split Pricing ─────────────────────────────┐    │
+  │  │  STORE (→ POS):   $5.99  │ Case: $65.00    │    │
+  │  │  ONLINE (→ Shop): $6.49  │ Case: $70.00    │    │
+  │  │  COST:            $3.50  │ Case: $38.00    │    │
+  │  └──────────────────────────────────────────────┘    │
+  │  ┌─ Tax ────────────────────────────────────────┐    │
+  │  │  POS Tax: Non-Taxable (code 4)  [MASTER]    │    │
+  │  │  Shopify Tax: Taxable           [MISMATCH]  │    │
+  │  └──────────────────────────────────────────────┘    │
+  │  ┌─ Categories ─────────────────────────────────┐    │
+  │  │  POS Dept: SNACKS (dropdown from PLU)        │    │
+  │  │  Shopify Tags: Indian Spices, Snacks         │    │
+  │  │  ☑ Category mapping confirmed                │    │
+  │  └──────────────────────────────────────────────┘    │
+  └──────────────────────────────────────────────────────┘
+
+
+5. DATA AUTHORITY RULES
+═══════════════════════
+
+Each system is the "master" for specific data:
+
+  ┌───────────────┬──────────────────────────────────┐
+  │ DATA          │ MASTER SYSTEM                    │
+  ├───────────────┼──────────────────────────────────┤
+  │ TAX codes     │ 🏪 POS (Penny Lane)             │
+  │               │    Code 1 = Taxable (HST 13%)   │
+  │               │    Code 4 = Non-Taxable          │
+  ├───────────────┼──────────────────────────────────┤
+  │ IMAGES        │ 🛒 Shopify (apniroots.com)      │
+  │               │    CDN-hosted product photos     │
+  ├───────────────┼──────────────────────────────────┤
+  │ PRICES        │ 📱 Firebase (our app)            │
+  │               │    Store price → sent to POS     │
+  │               │    Online price → sent to Shopify│
+  │               │    Different prices = OK         │
+  ├───────────────┼──────────────────────────────────┤
+  │ CATEGORIES    │ ⚠️ Confirm-first (manual)        │
+  │               │    POS has departments            │
+  │               │    Shopify has tags               │
+  │               │    User confirms mapping          │
+  └───────────────┴──────────────────────────────────┘
+
+
+6. COMPLETE FEATURE LIST
+════════════════════════
+
+  A. STORE MANAGEMENT
+     • Multi-store support (Main Street, Oakville, Brampton)
+     • Store-specific inventory and orders
+     • Per-store label queue
+
+  B. VENDOR MANAGEMENT
+     • Vendor profiles with contact info
+     • Products organized by vendor
+     • Order history per vendor
+
+  C. PRODUCT MANAGEMENT (Product Hub)
+     • Unified view across POS + Shopify + Firebase
+     • Auto-hydration: parallel POS & Shopify lookup
+     • Conflict detection with severity levels
+     • Split pricing: store vs online
+     • Tax management: POS is master, Shopify mismatch alerts
+     • Category mapping with confirmation workflow
+     • Shopify image display (CDN source)
+     • Front/back camera capture with background removal
+     • Reorder rules (min stock, default order qty)
+
+  D. ORDERING
+     • Create orders from product list
+     • Stock mode vs Order mode
+     • Case/piece quantity tracking
+
+  E. SYNC & EXPORT
+     • Sync to Shopify (create or update products)
+     • POS Export (generate NewCodes.txt for Penny Lane)
+     • Bulk sync from hamburger menu
+
+  F. LABEL QUEUE
+     • One-tap label request from product screen
+     • Reasons: Missing, Wrong Price, New Product, Damaged
+     • Queue management screen for batch printing
+
+  G. PRODUCT IMPORT
+     • CSV import for bulk product loading
+     • Sample imports included per store
+
+
+7. USER WORKFLOW — DAILY OPERATIONS
+════════════════════════════════════
+
+  MORNING STOCK CHECK:
+  ┌──────────────────────────────────────────────────┐
+  │                                                  │
+  │  1. Open app → Select store → Select vendor      │
+  │                    │                              │
+  │  2. Tap product (or scan barcode)                │
+  │                    │                              │
+  │  3. Product Hub opens → auto-checks POS+Shopify  │
+  │                    │                              │
+  │  4. See status:                                  │
+  │     ✅ Both systems → review prices & tax        │
+  │     ⚠️ Missing from one → sync/export            │
+  │     🔴 Tax mismatch → flag for correction        │
+  │                    │                              │
+  │  5. If shelf label needed → tap reason button    │
+  │                    │                              │
+  │  6. Save → data stored in Firebase               │
+  │                                                  │
+  └──────────────────────────────────────────────────┘
+
+  VENDOR ORDERING:
+  ┌──────────────────────────────────────────────────┐
+  │                                                  │
+  │  1. Switch to ORDER mode                         │
+  │                    │                              │
+  │  2. Go through products → set quantities         │
+  │                    │                              │
+  │  3. Review order → submit                        │
+  │                    │                              │
+  │  4. Order saved with timestamp + totals          │
+  │                                                  │
+  └──────────────────────────────────────────────────┘
+
+  NEW PRODUCT SETUP:
+  ┌──────────────────────────────────────────────────┐
+  │                                                  │
+  │  1. Scan barcode of new product                  │
+  │                    │                              │
+  │  2. Product Hub auto-checks:                     │
+  │     • Found in POS? → auto-fills name, price,   │
+  │       tax, department                            │
+  │     • Found in Shopify? → shows image, online    │
+  │       price                                      │
+  │                    │                              │
+  │  3. Fill in missing info, set split pricing      │
+  │                    │                              │
+  │  4. Sync to Shopify → creates product online     │
+  │                    │                              │
+  │  5. POS Export → generates NewCodes.txt          │
+  │     → upload to POS Windows PC                   │
+  │                    │                              │
+  │  6. Request shelf label → goes to print queue    │
+  │                                                  │
+  └──────────────────────────────────────────────────┘
+
+
+8. TECHNOLOGY STACK
+═══════════════════
+
+  ┌───────────────────┬──────────────────────────────┐
+  │ Component         │ Technology                   │
+  ├───────────────────┼──────────────────────────────┤
+  │ Frontend          │ Flutter Web (Dart)           │
+  │ Database          │ Firebase Firestore           │
+  │ File Storage      │ Firebase Storage             │
+  │ Hosting           │ Firebase Hosting             │
+  │ API Proxy         │ Google Cloud Run (Node.js)   │
+  │ Online Store      │ Shopify (GraphQL Admin API)  │
+  │ In-Store POS      │ Penny Lane (Windows)         │
+  │ Image Processing  │ remove.bg API                │
+  │ Barcode Scanning  │ MobileScanner (camera)       │
+  └───────────────────┴──────────────────────────────┘
+
+
+9. COST STRUCTURE (Monthly Estimates)
+═════════════════════════════════════
+
+  Firebase (Spark/Blaze):
+    • Firestore reads/writes .............. ~$0-5/mo
+    • Hosting .............................. FREE
+    • Storage .............................. ~$0-1/mo
+
+  Google Cloud Run (Sync Proxy):
+    • Low traffic ......................... ~$0-2/mo
+    • Auto-scales to zero when idle
+
+  Shopify:
+    • Existing plan (already paying)
+
+  remove.bg API:
+    • Free tier: 50 images/month
+    • Beyond: ~$0.20/image
+
+  ESTIMATED TOTAL: $0–10/month
+  (Most services within free tier for our volume)
+
+
+10. WHAT'S NEXT — ROADMAP
+══════════════════════════
+
+  PHASE 1 (DONE ✅):
+    ☑ Multi-store product management
+    ☑ Vendor ordering system
+    ☑ Product Hub with POS + Shopify integration
+    ☑ Split pricing (store vs online)
+    ☑ Tax mismatch detection
+    ☑ Shopify sync (create/update)
+    ☑ POS export (NewCodes.txt)
+    ☑ Label queue system
+    ☑ Camera capture with background removal
+    ☑ CSV import
+
+  PHASE 2 (POTENTIAL):
+    ☐ Auto-sync Shopify tax when POS is master
+    ☐ Inventory tracking with low-stock alerts
+    ☐ Order PDF generation for vendors
+    ☐ Barcode label printing integration
+    ☐ Sales analytics dashboard
+    ☐ Multi-user roles (owner, manager, staff)
+    ☐ Mobile app (Android/iOS) from same codebase
+
+
+══════════════════════════════════════════════════════════════════════
+  Live App: https://storeordering-10125.web.app
+  Project: storeordering-10125 (Google Cloud)
+  Store: apniroots.com (Shopify)
+══════════════════════════════════════════════════════════════════════

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="NewStore Ordering App">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="NewStore Ordering">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1F2937">
+  <title>NewStore Ordering</title>
+  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="apple-touch-icon" href="favicon.png">
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body {
+      background-color: #FAFAFA;
+      /* Prevent overscroll on iOS Safari */
+      overflow: hidden;
+      position: fixed;
+      width: 100%;
+      height: 100%;
+    }
+    /* Loading indicator while Flutter initializes */
+    .loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #64748b;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading" class="loading">Loading...</div>
+  <!-- Load flutter_bootstrap.js to register _flutter.loader, but it also auto-calls load().
+       We override by setting _flutter.loader before the script runs. -->
+  <script>
+    // Pre-configure Flutter before bootstrap runs
+    window._flutter = window._flutter || {};
+  </script>
+  <script src="flutter_bootstrap.js?v=20260325b" async></script>
+</body>
+</html>
