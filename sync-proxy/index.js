@@ -3,6 +3,7 @@ const cors = require('cors');
 const axios = require('axios');
 const admin = require('firebase-admin');
 
+
 // Initialize Firebase Admin (uses Application Default Credentials on Cloud Run)
 admin.initializeApp({
   storageBucket: 'storeordering-10125.firebasestorage.app',
