@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 import 'package:newstore_ordering_app/models/models.dart';
 import 'package:newstore_ordering_app/services/firebase_service.dart';
+import 'package:newstore_ordering_app/services/sync_service.dart';
 
 // Web-only imports handled via universal_html or conditional import
 import 'csv_export_web.dart' if (dart.library.io) 'csv_export_stub.dart' as platform;
@@ -10,28 +11,31 @@ import 'csv_export_web.dart' if (dart.library.io) 'csv_export_stub.dart' as plat
 class CsvExport {
   static final FirebaseService _firebaseService = FirebaseService();
 
-  /// Fetches all stores, vendors and their products, builds CSV, and triggers download.
+  /// Fetches vendors and products for [store], optionally filtered to [vendorId].
   /// Returns the number of product rows exported.
-  static Future<int> exportVendorProducts() async {
-    // 1. Fetch all stores
-    final stores = await _firebaseService.getStores();
-    if (stores.isEmpty) {
-      throw Exception('No stores found to export.');
+  static Future<int> exportVendorProducts({
+    required Store store,      // which store to export
+    String? vendorId,          // null = all vendors
+  }) async {
+    // Fetch vendors for the selected store (optionally filter to one)
+    final allVendors = await _firebaseService.getVendors(store.id);
+    final vendors = vendorId != null
+        ? allVendors.where((v) => v.id == vendorId).toList()
+        : allVendors;
+
+    if (vendors.isEmpty) {
+      throw Exception('No vendors found for ${store.name}.');
     }
 
-    // 2. Fetch vendors and products per store
+    // 2. Fetch products per vendor
     final List<_ExportRow> rows = [];
-    for (final store in stores) {
-      final vendors = await _firebaseService.getVendors(store.id);
-      if (vendors.isEmpty) continue;
-      for (final vendor in vendors) {
-        final products = await _firebaseService.getProducts(store.id, vendor.id);
-        if (products.isEmpty) {
-          rows.add(_ExportRow(store: store, vendor: vendor, product: null));
-        } else {
-          for (final product in products) {
-            rows.add(_ExportRow(store: store, vendor: vendor, product: product));
-          }
+    for (final vendor in vendors) {
+      final products = await _firebaseService.getProducts(store.id, vendor.id);
+      if (products.isEmpty) {
+        rows.add(_ExportRow(store: store, vendor: vendor, product: null));
+      } else {
+        for (final product in products) {
+          rows.add(_ExportRow(store: store, vendor: vendor, product: product));
         }
       }
     }
@@ -44,10 +48,86 @@ class CsvExport {
     final csv = _buildCsv(rows);
 
     // 4. Trigger download
-    final filename = 'vendor_products_${DateTime.now().millisecondsSinceEpoch}.csv';
+    final vendorSlug = vendorId != null
+        ? _slug(vendors.first.name)
+        : 'all';
+    final filename = '${_timestamp()}_products_${_slug(store.name)}_$vendorSlug.csv';
     platform.downloadCsv(csv, filename);
 
     return rows.where((r) => r.product != null).length;
+  }
+
+  /// Export UberEats CSV — uses ubereats_margins Firebase settings.
+  static Future<int> exportUberEats() => _exportPlatform(
+    platformDocId:      'ubereats_margins',
+    platformPriceLabel: 'Uber Price',
+    filename:           '${_timestamp()}_ubereats.csv',
+  );
+
+  /// Export Instacart CSV — uses instacart_margins Firebase settings.
+  static Future<int> exportInstacart() => _exportPlatform(
+    platformDocId:      'instacart_margins',
+    platformPriceLabel: 'Instacart Price',
+    filename:           '${_timestamp()}_instacart.csv',
+  );
+
+  /// Shared export logic for any online platform.
+  static Future<int> _exportPlatform({
+    required String platformDocId,
+    required String platformPriceLabel,
+    required String filename,
+  }) async {
+    final results = await Future.wait([
+      SyncService().getShopifyActiveProducts(),
+      _firebaseService.getPlatformMargins(platformDocId),
+    ]);
+    final products    = results[0] as List<Map<String, dynamic>>;
+    final marginsData = results[1] as Map<String, dynamic>;
+
+    if (products.isEmpty) throw Exception('No active Shopify products found.');
+
+    final defaultMargin = (marginsData['defaultMargin'] as num?)?.toDouble() ?? 20.0;
+    final rawTagMargins = (marginsData['tagMargins'] as Map<String, dynamic>?) ?? {};
+    final tagMargins    = rawTagMargins.map((k, v) => MapEntry(k, (v as num).toDouble()));
+
+    final buffer = StringBuffer();
+    buffer.writeln([
+      'Handle', 'Product Name', 'SKU', 'Price', 'Margin %', platformPriceLabel, 'Tax Code', 'Tags', 'Image URL',
+    ].map(_escapeCsv).join(','));
+
+    for (final p in products) {
+      final taxable      = p['taxable'] as bool? ?? false;
+      final tags         = p['tags'] as String? ?? '';
+      final margin       = _resolveMargin(tags, defaultMargin, tagMargins);
+      final basePrice    = double.tryParse(p['price'] as String? ?? '0') ?? 0.0;
+      final platformPrice = basePrice * (1 + margin / 100);
+      buffer.writeln([
+        p['handle']   ?? '',
+        p['title']    ?? '',
+        p['sku']      ?? '',
+        basePrice.toStringAsFixed(2),
+        margin.toStringAsFixed(1),
+        platformPrice.toStringAsFixed(2),
+        taxable ? '13' : '',
+        tags,
+        p['imageUrl'] ?? '',
+      ].map((v) => _escapeCsv(v.toString())).join(','));
+    }
+
+    platform.downloadCsv(buffer.toString(), filename);
+    return products.length;
+  }
+
+  /// Returns the margin % for a product based on its tags.
+  /// First matching tag wins; falls back to [defaultMargin].
+  static double _resolveMargin(
+      String tags, double defaultMargin, Map<String, double> tagMargins) {
+    if (tagMargins.isEmpty) return defaultMargin;
+    for (final tag in tags.split(',').map((t) => t.trim())) {
+      final m = tagMargins[tag];
+      if (m != null) return m;
+    }
+    return defaultMargin;
   }
 
   static String _buildCsv(List<_ExportRow> rows) {
@@ -56,42 +136,51 @@ class CsvExport {
     // Header row — matches import format: Vendor Name, Product Name, SKU, …, Vendor Phone
     // with Store Name prepended
     buffer.writeln([
-      'Store Name',
-      'Vendor Name',
-      'Product Name',
-      'SKU',
-      'Pcs Per Case',
-      'Pcs Per Line',
-      'Pc Price',
-      'Case Price',
-      'Pc Cost',
-      'Case Cost',
-      'Min Stock',
-      'Default Order',
-      'Vendor Phone',
+      'Vendor Name',     // col 0  — import skips header when col 0 starts with "vendor"
+      'Product Name',    // col 1
+      'SKU',             // col 2
+      'Pcs Per Case',    // col 3
+      'Pcs Per Line',    // col 4
+      'Pc Price',        // col 5
+      'Case Price',      // col 6
+      'Pc Cost',         // col 7
+      'Case Cost',       // col 8
+      'Min Stock',       // col 9
+      'Default Order',   // col 10
+      'On Hand (Pcs)',   // col 11 — import ignores this
+      'Order Qty (Cs)',  // col 12 — import ignores this
+      'Vendor Phone',    // col 13 — import reads phone here
     ].map(_escapeCsv).join(','));
 
     // Data rows
     for (final row in rows) {
       buffer.writeln([
-        row.store?.name ?? '',
-        row.vendor.name,
-        row.product?.name ?? '',
-        row.product?.sku ?? '',
-        row.product?.pcsPerCase.toString() ?? '',
-        row.product?.pcsPerLine.toString() ?? '',
-        row.product?.pcPrice.toStringAsFixed(2) ?? '',
-        row.product?.casePrice.toStringAsFixed(2) ?? '',
-        row.product?.pcCost.toStringAsFixed(2) ?? '',
-        row.product?.caseCost.toStringAsFixed(2) ?? '',
-        row.product?.reorderRule.minStockPcs.toString() ?? '',
-        row.product?.reorderRule.defaultOrderQty.toString() ?? '',
-        row.vendor.whatsappPhoneNumber,
+        row.vendor.name,                                           // col 0
+        row.product?.name ?? '',                                   // col 1
+        row.product?.sku ?? '',                                    // col 2
+        row.product?.pcsPerCase.toString() ?? '',                  // col 3
+        row.product?.pcsPerLine.toString() ?? '',                  // col 4
+        row.product?.pcPrice.toStringAsFixed(2) ?? '',             // col 5
+        row.product?.casePrice.toStringAsFixed(2) ?? '',           // col 6
+        row.product?.pcCost.toStringAsFixed(2) ?? '',              // col 7
+        row.product?.caseCost.toStringAsFixed(2) ?? '',            // col 8
+        row.product?.reorderRule.minStockPcs.toString() ?? '',     // col 9
+        row.product?.reorderRule.defaultOrderQty.toString() ?? '', // col 10
+        '',                                                        // col 11 — On Hand blank on export
+        '',                                                        // col 12 — Order Qty blank on export
+        row.vendor.whatsappPhoneNumber,                            // col 13
       ].map(_escapeCsv).join(','));
     }
 
     return buffer.toString();
   }
+
+  /// Returns YYMMDDHHMM timestamp string.
+  static String _timestamp() => DateFormat('yyMMddHHmm').format(DateTime.now());
+
+  /// Lowercases a name and replaces non-alphanumeric chars with dashes.
+  static String _slug(String name) =>
+      name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-').replaceAll(RegExp(r'-+$'), '');
 
   /// Escapes a CSV field: wraps in quotes if it contains comma, quote, or newline.
   static String _escapeCsv(String field) {
@@ -101,14 +190,24 @@ class CsvExport {
     return field;
   }
 
-  /// Fetches all orders, resolves store/vendor names and full product details,
-  /// and exports a detailed CSV. Includes all items — even those with only
-  /// on-hand qty and no order qty. Returns the total number of rows exported.
-  static Future<int> exportOrders() async {
-    // 1. Fetch all orders, stores, vendors
-    final orders = await _firebaseService.getOrders();
+  /// Fetches orders for the given [storeId] (and optionally [vendorId]),
+  /// resolves store/vendor names and full product details, and exports a
+  /// detailed CSV. Includes all items — even those with only on-hand qty
+  /// and no order qty. Returns the total number of rows exported.
+  static Future<int> exportOrders({
+    required String storeId,   // filter to this store
+    String? vendorId,          // null = all vendors in that store
+  }) async {
+    // 1. Fetch orders filtered by storeId (and optionally vendorId)
+    final allOrders = await _firebaseService.getOrders();
+    final orders = allOrders.where((o) {
+      if (o.storeId != storeId) return false;
+      if (vendorId != null && o.vendorId != vendorId) return false;
+      return true;
+    }).toList();
+
     if (orders.isEmpty) {
-      throw Exception('No orders found to export.');
+      throw Exception('No orders found for the selected store/vendor.');
     }
 
     final stores = await _firebaseService.getStores();
@@ -153,6 +252,7 @@ class CsvExport {
       'Store',
       'Vendor',
       'Vendor Phone',
+      'Order List Name',
       'Product Name',
       'SKU',
       'Pcs Per Case',
@@ -211,6 +311,7 @@ class CsvExport {
             storeName,
             vendorName,
             vendorPhone,
+            product.orderListProductName.isNotEmpty ? product.orderListProductName : product.name,
             product.name,
             product.sku,
             product.pcsPerCase.toString(),
@@ -239,6 +340,7 @@ class CsvExport {
             storeName,
             vendorName,
             vendorPhone,
+            item.productName, // already the orderListProductName
             item.productName,
             product?.sku ?? '',
             product?.pcsPerCase.toString() ?? '',
@@ -258,7 +360,11 @@ class CsvExport {
     }
 
     // 3. Trigger download
-    final filename = 'orders_export_${DateTime.now().millisecondsSinceEpoch}.csv';
+    final storeName = storeMap[storeId] ?? storeId;
+    final vendorSlug = vendorId != null
+        ? _slug(vendorLookup['${storeId}_$vendorId']?.name ?? vendorId)
+        : 'all';
+    final filename = '${_timestamp()}_orders_${_slug(storeName)}_$vendorSlug.csv';
     platform.downloadCsv(buffer.toString(), filename);
 
     return rowCount;

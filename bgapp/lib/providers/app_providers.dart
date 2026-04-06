@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart' as fbauth;
 import 'package:newstore_ordering_app/models/models.dart';
 import 'package:newstore_ordering_app/services/firebase_service.dart';
+import 'package:newstore_ordering_app/utils/app_roles.dart';
 
 class StoreProvider extends ChangeNotifier {
   final FirebaseService _firebaseService = FirebaseService();
@@ -246,6 +248,18 @@ class OrderProvider extends ChangeNotifier {
     }
   }
 
+  /// Upsert — creates or overwrites. Used for auto-save drafts.
+  Future<void> addOrUpdateOrder(Order order) async {
+    await _firebaseService.addOrder(order); // addOrder uses .set() — safe as upsert
+    final index = _orders.indexWhere((o) => o.id == order.id);
+    if (index != -1) {
+      _orders[index] = order;
+    } else {
+      _orders.add(order);
+    }
+    notifyListeners();
+  }
+
   Future<void> deleteOrder(String orderId) async {
     await _firebaseService.deleteOrder(orderId);
     _orders.removeWhere((o) => o.id == orderId);
@@ -256,26 +270,92 @@ class OrderProvider extends ChangeNotifier {
 class AuthProvider extends ChangeNotifier {
   final FirebaseService _firebaseService = FirebaseService();
   User? _user;
+  String _role = AppRoles.staff;
   bool _isLoading = false;
+  String? _error;
 
   User? get user => _user;
+  String get role => _role;
   bool get isLoading => _isLoading;
   bool get isAuthenticated => _user != null;
+  String? get error => _error;
+
+  bool get isPending => _role == AppRoles.pending && _user != null;
+  bool hasPermission(String permission) => AppRoles.hasPermission(_role, permission);
+
+  /// Re-fetches the user's role from Firestore. Used on the pending screen.
+  Future<void> refreshRole() async {
+    if (_user == null) return;
+    final role = await _firebaseService.getUserRole(_user!.id);
+    if (role != null && role != _role) {
+      _role = role;
+      notifyListeners();
+    }
+  }
 
   AuthProvider() {
     _initAuthListener();
   }
 
   void _initAuthListener() {
-    _firebaseService.authStateChanges.listen((user) {
-      _user = user;
+    _firebaseService.rawAuthStateChanges.listen((fbUser) async {
+      if (fbUser == null) {
+        _user = null;
+        _role = AppRoles.staff;
+        _isLoading = false;
+        notifyListeners();
+        return;
+      }
+      _user = User(
+        id: fbUser.uid,
+        email: fbUser.email ?? '',
+        displayName: fbUser.displayName ?? 'User',
+      );
+      // Anonymous users get staff by default, no Firestore doc created
+      if (!fbUser.isAnonymous) {
+        final role = await _firebaseService.getUserRole(fbUser.uid);
+        _role = role ?? AppRoles.pending; // unknown users are pending until admin assigns a role
+      } else {
+        _role = AppRoles.pending; // guest users also get no access
+      }
       _isLoading = false;
       notifyListeners();
     });
   }
 
+  Future<void> signInWithGoogle() async {
+    _isLoading = true;
+    _error = null;
+    notifyListeners();
+    try {
+      await _firebaseService.signInWithGoogle();
+    } catch (e) {
+      _error = 'Google sign-in failed. Please try again.';
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> signInWithEmailPassword(String email, String password) async {
+    _isLoading = true;
+    _error = null;
+    notifyListeners();
+    try {
+      await _firebaseService.signInWithEmailPassword(email, password);
+    } on fbauth.FirebaseAuthException catch (e) {
+      _error = _authErrorMessage(e.code);
+      _isLoading = false;
+      notifyListeners();
+    } catch (e) {
+      _error = 'Sign-in failed. Please try again.';
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> signInAsGuest() async {
     _isLoading = true;
+    _error = null;
     notifyListeners();
     try {
       await _firebaseService.signInAnonymously();
@@ -288,6 +368,19 @@ class AuthProvider extends ChangeNotifier {
   Future<void> signOut() async {
     await _firebaseService.signOut();
     _user = null;
+    _role = AppRoles.staff;
     notifyListeners();
+  }
+
+  String _authErrorMessage(String code) {
+    switch (code) {
+      case 'user-not-found':
+      case 'invalid-credential': return 'Incorrect email or password.';
+      case 'wrong-password':     return 'Incorrect password.';
+      case 'invalid-email':      return 'Invalid email address.';
+      case 'user-disabled':      return 'This account has been disabled.';
+      case 'too-many-requests':  return 'Too many attempts. Try again later.';
+      default:                   return 'Sign-in failed. Please try again.';
+    }
   }
 }

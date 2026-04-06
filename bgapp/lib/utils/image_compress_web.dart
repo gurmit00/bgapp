@@ -7,51 +7,53 @@ import 'dart:html' as html;
 /// Compress an image to JPEG and resize if larger than [maxDimension].
 /// Returns base64-encoded JPEG string.
 /// [quality] is 0.0 – 1.0 (default 0.75 ≈ good quality, small file).
+/// Compress and resize image to exactly [targetW]×[targetH] JPEG.
+/// Product centred, white background, quality 0.92 — matches Shopify product image format (756×1008).
+/// [brightness] and [contrast] are CSS filter multipliers (1.0 = no change).
 Future<String> compressImageToBase64(
   Uint8List imageBytes, {
-  int maxDimension = 1024,
-  double quality = 0.75,
+  int maxDimension = 1024, // ignored — kept for API compatibility
+  double quality = 0.92,
+  int targetW = 756,
+  int targetH = 1008,
+  double brightness = 1.10, // +10% brightness — compensates for phone camera dark shots
+  double contrast = 1.15,   // +15% contrast  — makes product pop against background
 }) async {
   final completer = Completer<String>();
 
-  // Create a blob from the raw bytes and load into an HTMLImageElement
   final blob = html.Blob([imageBytes]);
   final url = html.Url.createObjectUrlFromBlob(blob);
   final img = html.ImageElement(src: url);
 
   img.onLoad.listen((_) {
-    // Calculate scaled dimensions
-    int w = img.naturalWidth;
-    int h = img.naturalHeight;
+    final srcW = img.naturalWidth;
+    final srcH = img.naturalHeight;
 
-    if (w > maxDimension || h > maxDimension) {
-      if (w > h) {
-        h = (h * maxDimension / w).round();
-        w = maxDimension;
-      } else {
-        w = (w * maxDimension / h).round();
-        h = maxDimension;
-      }
-    }
+    // Scale to fit inside target while keeping aspect ratio
+    final scale = (targetW / srcW) < (targetH / srcH)
+        ? targetW / srcW
+        : targetH / srcH;
+    final drawW = (srcW * scale).round();
+    final drawH = (srcH * scale).round();
 
-    // Draw onto a canvas at the target size
-    final canvas = html.CanvasElement(width: w, height: h);
+    // Centre on white canvas
+    final offsetX = ((targetW - drawW) / 2).round();
+    final offsetY = ((targetH - drawH) / 2).round();
+
+    final canvas = html.CanvasElement(width: targetW, height: targetH);
     final ctx = canvas.context2D;
-    ctx.drawImageScaled(img, 0, 0, w, h);
+    ctx.fillStyle = '#FFFFFF';                                                          // white background
+    ctx.fillRect(0, 0, targetW, targetH);
+    ctx.filter = 'brightness($brightness) contrast($contrast)';                         // enhance for product shots
+    ctx.drawImageScaled(img, offsetX, offsetY, drawW, drawH);                           // centred product
 
-    // Export as JPEG with quality
     final dataUrl = canvas.toDataUrl('image/jpeg', quality);
-
-    // Strip the "data:image/jpeg;base64," prefix
-    final b64 = dataUrl.split(',').last;
-
     html.Url.revokeObjectUrl(url);
-    completer.complete(b64);
+    completer.complete(dataUrl.split(',').last);
   });
 
   img.onError.listen((_) {
     html.Url.revokeObjectUrl(url);
-    // Fallback: return original as base64 without compression
     completer.complete(base64Encode(imageBytes));
   });
 
@@ -71,4 +73,54 @@ Future<String> compressBase64Image(
     maxDimension: maxDimension,
     quality: quality,
   );
+}
+
+/// Resize a base64 PNG to exactly [targetW]×[targetH], centred on a transparent canvas.
+/// Keeps transparency — use after background removal (JPEG would destroy alpha).
+/// Defaults to 756×1008 (3:4 portrait) to match existing Shopify product images.
+/// [brightness] and [contrast] are CSS filter multipliers (1.0 = no change).
+Future<String> resizeBase64Png(
+  String base64Str, {
+  int targetW = 756,
+  int targetH = 1008,
+  double brightness = 1.10, // +10% brightness
+  double contrast = 1.15,   // +15% contrast
+}) async {
+  final completer = Completer<String>();
+  final bytes = base64Decode(base64Str);
+  final blob = html.Blob([Uint8List.fromList(bytes)]);
+  final url = html.Url.createObjectUrlFromBlob(blob);
+  final img = html.ImageElement(src: url);
+
+  img.onLoad.listen((_) {
+    final srcW = img.naturalWidth;
+    final srcH = img.naturalHeight;
+
+    // Scale to fit inside target while keeping aspect ratio
+    final scale = (targetW / srcW) < (targetH / srcH)
+        ? targetW / srcW
+        : targetH / srcH;
+    final drawW = (srcW * scale).round();
+    final drawH = (srcH * scale).round();
+
+    // Centre on the target canvas
+    final offsetX = ((targetW - drawW) / 2).round();
+    final offsetY = ((targetH - drawH) / 2).round();
+
+    final canvas = html.CanvasElement(width: targetW, height: targetH);
+    final ctx = canvas.context2D;
+    ctx.clearRect(0, 0, targetW, targetH);                                    // transparent background
+    ctx.filter = 'brightness($brightness) contrast($contrast)';               // enhance product colours
+    ctx.drawImageScaled(img, offsetX, offsetY, drawW, drawH);                 // centred product
+    final dataUrl = canvas.toDataUrl('image/png');                            // PNG keeps transparency
+    html.Url.revokeObjectUrl(url);
+    completer.complete(dataUrl.split(',').last);
+  });
+
+  img.onError.listen((_) {
+    html.Url.revokeObjectUrl(url);
+    completer.complete(base64Str); // fallback: return as-is
+  });
+
+  return completer.future;
 }

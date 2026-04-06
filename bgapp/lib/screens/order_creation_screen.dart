@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:newstore_ordering_app/models/models.dart';
 import 'package:newstore_ordering_app/providers/app_providers.dart';
+import 'package:newstore_ordering_app/services/firebase_service.dart';
 import 'package:newstore_ordering_app/utils/theme.dart';
 import 'package:intl/intl.dart';
 
@@ -26,23 +28,49 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
   final Map<String, TextEditingController> _onHandControllers = {};
   final Map<String, TextEditingController> _orderQtyControllers = {};
 
+  Timer? _autoSaveTimer;
+  // The order id used for auto-saving drafts (stable across keystrokes)
+  late String _draftOrderId;
+  bool _autoSaving = false;
+  // createdAt of the existing order — preserved across saves
+  DateTime? _originalCreatedAt;
+
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+
   @override
   void initState() {
     super.initState();
+    _draftOrderId = widget.editingOrder?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ProductProvider>().loadProductsByVendor(widget.store.id, widget.vendor.id);
-      if (widget.editingOrder != null) {
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (mounted) _populateFieldsFromOrder();
-        });
-      }
+      _loadFreshOrder();
     });
   }
 
-  void _populateFieldsFromOrder() {
+  /// Always fetches the latest order data from Firebase so all users see
+  /// the same up-to-date quantities when they open the screen.
+  Future<void> _loadFreshOrder() async {
     if (widget.editingOrder == null) return;
+
+    final fresh = await FirebaseService().getOrderById(_draftOrderId);
+    if (!mounted) return;
+
+    final orderToLoad = fresh ?? widget.editingOrder!;
+    _originalCreatedAt = orderToLoad.createdAt;
+
+    // Wait for products to be loaded before populating
+    await Future.doWhile(() async {
+      if (!mounted) return false;
+      final products = context.read<ProductProvider>().products;
+      if (products.isNotEmpty) return false;
+      await Future.delayed(const Duration(milliseconds: 100));
+      return true;
+    });
+
+    if (!mounted) return;
     final products = context.read<ProductProvider>().products;
-    for (var item in widget.editingOrder!.items) {
+    for (final item in orderToLoad.items) {
       final product = products.where((p) => p.id == item.productId).firstOrNull;
       if (product != null) {
         _getOnHandController(product).text = item.onHandQtyPcs > 0 ? item.onHandQtyPcs.toString() : '';
@@ -54,6 +82,8 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
 
   @override
   void dispose() {
+    _autoSaveTimer?.cancel();
+    _searchController.dispose();
     _onHandControllers.values.forEach((c) => c.dispose());
     _orderQtyControllers.values.forEach((c) => c.dispose());
     super.dispose();
@@ -97,9 +127,18 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              widget.editingOrder != null ? 'Edit Order' : 'Create Order',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            Row(
+              children: [
+                Text(
+                  widget.editingOrder != null ? 'Edit Order' : 'Create Order',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                if (_autoSaving) ...[
+                  const SizedBox(width: 6),
+                  const SizedBox(width: 10, height: 10,
+                    child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.white60)),
+                ],
+              ],
             ),
             Text(
               '${widget.vendor.name} · ${widget.store.name}',
@@ -137,6 +176,16 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
       body: Consumer<ProductProvider>(
         builder: (context, productProvider, _) {
           final products = productProvider.products;
+          // Build indexed list so original row numbers are preserved when searching
+          final indexed = products.asMap().entries.toList(); // {index, product}
+          final filtered = _searchQuery.isEmpty
+              ? indexed
+              : indexed.where((e) {
+                  final name = e.value.orderListProductName.isNotEmpty
+                      ? e.value.orderListProductName
+                      : e.value.name;
+                  return name.toLowerCase().contains(_searchQuery.toLowerCase());
+                }).toList();
 
           if (products.isEmpty) {
             return Center(
@@ -183,15 +232,65 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                   ),
                 ),
 
+                // ─── Search Bar ───
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF9FAFB),
+                    border: Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
+                  ),
+                  child: TextField(
+                    controller: _searchController,
+                    onChanged: (v) => setState(() => _searchQuery = v.trim()),
+                    style: const TextStyle(fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'Search by product name…',
+                      hintStyle: TextStyle(fontSize: 13, color: AppTheme.textTertiary),
+                      prefixIcon: const Icon(Icons.search, size: 18),
+                      suffixIcon: _searchQuery.isNotEmpty
+                          ? IconButton(
+                              icon: const Icon(Icons.close, size: 16),
+                              onPressed: () {
+                                _searchController.clear();
+                                setState(() => _searchQuery = '');
+                              },
+                            )
+                          : null,
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 7),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: _gridColor),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: _gridColor),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: AppTheme.accentColor),
+                      ),
+                      filled: true,
+                      fillColor: Colors.white,
+                    ),
+                  ),
+                ),
+
                 // ─── Spreadsheet Data Rows ───
                 Expanded(
-                  child: ListView.builder(
-                    itemCount: products.length,
-                    itemBuilder: (context, index) {
-                      final product = products[index];
+                  child: filtered.isEmpty
+                      ? Center(
+                          child: Text('No products match "$_searchQuery"',
+                              style: TextStyle(fontSize: 13, color: AppTheme.textTertiary)),
+                        )
+                      : ListView.builder(
+                    itemCount: filtered.length,
+                    itemBuilder: (context, listIndex) {
+                      final originalIndex = filtered[listIndex].key;
+                      final product = filtered[listIndex].value;
                       final onHandCtrl = _getOnHandController(product);
                       final orderCtrl = _getOrderQtyController(product);
-                      final isEven = index % 2 == 0;
+                      final isEven = originalIndex % 2 == 0;
                       final hasOnHand = onHandCtrl.text.isNotEmpty;
                       final hasOrder = orderCtrl.text.isNotEmpty && orderCtrl.text != '0';
 
@@ -205,13 +304,13 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              // Row number
+                              // Row number (original position in full list)
                               Container(
                                 width: 32,
                                 color: _rowNumberBg,
                                 alignment: Alignment.center,
                                 child: Text(
-                                  '${index + 1}',
+                                  '${originalIndex + 1}',
                                   style: const TextStyle(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600,
@@ -225,14 +324,28 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                               Expanded(
                                 child: GestureDetector(
                                   onTap: () async {
-                                    await Navigator.of(context).pushNamed(
-                                      '/product',
-                                      arguments: {
-                                        'product': product,
-                                        'store': widget.store,
-                                        'vendor': widget.vendor,
-                                      },
-                                    );
+                                    if (product.sku.isNotEmpty) {
+                                      final stores = context.read<StoreProvider>().stores;
+                                      await Navigator.of(context).pushNamed(
+                                        '/product-lookup',
+                                        arguments: {
+                                          'sku': product.sku,
+                                          'allStores': stores,
+                                          'orderListProductName': product.orderListProductName.isNotEmpty
+                                              ? product.orderListProductName
+                                              : product.name,
+                                        },
+                                      );
+                                    } else {
+                                      await Navigator.of(context).pushNamed(
+                                        '/product',
+                                        arguments: {
+                                          'product': product,
+                                          'store': widget.store,
+                                          'vendor': widget.vendor,
+                                        },
+                                      );
+                                    }
                                     if (mounted) {
                                       context.read<ProductProvider>().loadProductsByVendor(widget.store.id, widget.vendor.id);
                                     }
@@ -247,7 +360,9 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                                       children: [
                                         // Product name — large, bold, prominent
                                         Text(
-                                          product.name,
+                                          product.orderListProductName.isNotEmpty
+                                              ? product.orderListProductName
+                                              : product.name,
                                           style: const TextStyle(
                                             fontSize: 15,
                                             fontWeight: FontWeight.w700,
@@ -344,6 +459,7 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                                   ),
                                   onChanged: (_) {
                                     _applyReorderRule(product);
+                                    _scheduleAutoSave();
                                   },
                                 ),
                               ),
@@ -376,7 +492,10 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                                       fontFamily: 'monospace',
                                     ),
                                   ),
-                                  onChanged: (_) => setState(() {}),
+                                  onChanged: (_) {
+                                    setState(() {});
+                                    _scheduleAutoSave();
+                                  },
                                 ),
                               ),
                             ],
@@ -400,7 +519,9 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                       const SizedBox(width: 32), // row number width
                       Expanded(
                         child: Text(
-                          '${products.length} products · $_counted counted',
+                          _searchQuery.isEmpty
+                              ? '${products.length} products · $_counted counted'
+                              : '${filtered.length} of ${products.length} · $_counted counted',
                           style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.textSecondary),
                         ),
                       ),
@@ -493,6 +614,54 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
     return Container(width: 0.5, color: color ?? _gridColor);
   }
 
+  // ─── Auto-save: debounced draft write so other users see live progress ───
+  void _scheduleAutoSave() {
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = Timer(const Duration(seconds: 2), _autoSaveDraft);
+  }
+
+  Future<void> _autoSaveDraft() async {
+    if (!mounted || _autoSaving) return;
+    final productProvider = context.read<ProductProvider>();
+    final orderProvider = context.read<OrderProvider>();
+
+    final items = <OrderItem>[];
+    for (final product in productProvider.products) {
+      final onHand = int.tryParse(_getOnHandController(product).text) ?? 0;
+      final orderQty = int.tryParse(_getOrderQtyController(product).text) ?? 0;
+      if (onHand > 0 || orderQty > 0) {
+        items.add(OrderItem(
+          id: '${product.id}_$_draftOrderId',
+          productId: product.id,
+          productName: product.orderListProductName.isNotEmpty
+              ? product.orderListProductName
+              : product.name,
+          onHandQtyPcs: onHand,
+          orderQtyCases: orderQty,
+          createdAt: DateTime.now(),
+        ));
+      }
+    }
+
+    setState(() => _autoSaving = true);
+    try {
+      final draft = Order(
+        id: _draftOrderId,
+        storeId: widget.store.id,
+        vendorId: widget.vendor.id,
+        items: items,
+        status: 'draft',
+        orderDate: DateTime.now(),
+        createdAt: _originalCreatedAt ?? DateTime.now(),
+      );
+      if (widget.editingOrder != null || items.isNotEmpty) {
+        await orderProvider.addOrUpdateOrder(draft);
+      }
+    } finally {
+      if (mounted) setState(() => _autoSaving = false);
+    }
+  }
+
   // ─── Helper: total order cases ───
   int _totalOrderCases(List<Product> products) {
     int total = 0;
@@ -522,6 +691,7 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                   id: DateTime.now().millisecondsSinceEpoch.toString(),
                   vendorId: widget.vendor.id,
                   name: nameCtrl.text.trim(),
+                  orderListProductName: nameCtrl.text.trim(),
                   sku: '',
                   pcsPerCase: 1, pcsPerLine: 1,
                   storePrice: 0, onlinePrice: 0, storeCasePrice: 0, onlineCasePrice: 0, pcCost: 0, caseCost: 0,
@@ -551,7 +721,9 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
         items.add(OrderItem(
           id: '${product.id}_${DateTime.now().millisecondsSinceEpoch}',
           productId: product.id,
-          productName: product.name,
+          productName: product.orderListProductName.isNotEmpty
+              ? product.orderListProductName
+              : product.name,
           onHandQtyPcs: onHand,
           orderQtyCases: orderQty,
           createdAt: DateTime.now(),
@@ -566,8 +738,10 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
       return;
     }
 
+    _autoSaveTimer?.cancel(); // don't auto-save while explicit save is in progress
+
     final order = Order(
-      id: widget.editingOrder?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      id: _draftOrderId,
       storeId: widget.store.id,
       vendorId: widget.vendor.id,
       items: items,
@@ -576,11 +750,7 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
       createdAt: widget.editingOrder?.createdAt ?? DateTime.now(),
     );
 
-    if (widget.editingOrder != null) {
-      await orderProvider.updateOrder(order);
-    } else {
-      await orderProvider.addOrder(order);
-    }
+    await orderProvider.addOrUpdateOrder(order);
 
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(

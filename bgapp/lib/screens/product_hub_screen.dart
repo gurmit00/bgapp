@@ -7,14 +7,15 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:http/http.dart' as http;
 import 'package:newstore_ordering_app/models/models.dart';
 import 'package:newstore_ordering_app/providers/app_providers.dart';
-import 'package:newstore_ordering_app/providers/label_queue_provider.dart';
 import 'package:newstore_ordering_app/utils/theme.dart';
 import 'package:newstore_ordering_app/utils/design_tokens.dart';
 import 'package:newstore_ordering_app/utils/image_picker_web.dart';
 import 'package:newstore_ordering_app/providers/plu_provider.dart';
 import 'package:newstore_ordering_app/services/sync_service.dart';
+import 'package:newstore_ordering_app/services/firebase_service.dart';
 import 'package:newstore_ordering_app/utils/image_compress_web.dart';
 import 'package:newstore_ordering_app/services/product_hub_engine.dart';
+import 'package:newstore_ordering_app/utils/app_roles.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// Product Hub Screen — unified product management across
@@ -24,20 +25,63 @@ import 'package:url_launcher/url_launcher.dart';
 ///   STOCK — during stocking/shelf verification
 ///   ORDER — building vendor orders from product list
 class ProductHubScreen extends StatefulWidget {
-  final Product product;
-  final Store store;
-  final Vendor vendor;
+  // Single-store mode params (existing flow)
+  final Product? product;
+  final Store? store;
+  final Vendor? vendor;
   final Order? currentOrder;
   final String mode; // 'stock' or 'order'
 
+  // Multi-store mode params (Products tab flow)
+  final CrossStoreProduct? crossStoreProduct;
+  final List<Store>? allStores;
+
+  // Lookup mode — just a SKU, no existing product
+  final String? lookupSku;
+  // The order-list name to display when in lookup mode
+  final String? lookupOrderListProductName;
+
   const ProductHubScreen({
     Key? key,
-    required this.product,
-    required this.store,
-    required this.vendor,
+    this.product,
+    this.store,
+    this.vendor,
     this.currentOrder,
     this.mode = 'stock',
+    this.crossStoreProduct,
+    this.allStores,
+    this.lookupSku,
+    this.lookupOrderListProductName,
   }) : super(key: key);
+
+  bool get isMultiStoreMode => crossStoreProduct != null || isLookupMode;
+  bool get isLookupMode => lookupSku != null && crossStoreProduct == null && product == null;
+
+  /// The active product (first ref in multi-store, or the single product, or empty for lookup)
+  Product get activeProduct {
+    if (isLookupMode) {
+      return Product(id: '', vendorId: '', name: '', orderListProductName: lookupOrderListProductName ?? '', sku: lookupSku!, pcsPerCase: 0, pcsPerLine: 1, reorderRule: ReorderRule(minStockPcs: 0, defaultOrderQty: 0), createdAt: DateTime.now());
+    }
+    return crossStoreProduct != null ? crossStoreProduct!.refs.first.product : product!;
+  }
+
+  Store? get activeStoreOrNull {
+    if (isLookupMode) return null;
+    if (crossStoreProduct != null) {
+      return allStores?.firstWhere((s) => s.id == crossStoreProduct!.refs.first.storeId);
+    }
+    return store;
+  }
+
+  Store get activeStore => activeStoreOrNull ?? Store(id: '', name: 'Unknown', address: '', phone: '');
+
+  Vendor get activeVendor {
+    if (isLookupMode) return Vendor(id: '', name: '', whatsappPhoneNumber: '', createdAt: DateTime.now());
+    if (crossStoreProduct != null) {
+      return Vendor(id: crossStoreProduct!.refs.first.vendorId, name: crossStoreProduct!.refs.first.vendorName, whatsappPhoneNumber: '', createdAt: DateTime.now());
+    }
+    return vendor!;
+  }
 
   @override
   State<ProductHubScreen> createState() => _ProductHubScreenState();
@@ -69,10 +113,12 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   // ── Hub status ──
   ProductHubEngine? _hubEngine;
   ProductHubStatus _hubStatus = ProductHubStatus();
+  MultiStoreHubStatus _multiHubStatus = MultiStoreHubStatus.empty();
   bool _isHydrating = false;
 
   // ── Tax ──
-  String _posTaxCode = '1';
+  String _posTaxCode    = '1';    // POS tax code (master)
+  // Shopify taxable always follows POS tax — no independent state
 
   // ── Categories ──
   String _posDepartmentName = '';
@@ -88,19 +134,31 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   bool _isExportingPOS = false;
   bool _isSaving = false;
 
-  // remove.bg API key
-  static const String _removeBgApiKey = '8g311xjc3aQaxLi58RQZwiHn';
+  /// Active conflicts from either single or multi-store mode
+  List<ProductConflict> get _activeConflicts =>
+      widget.isMultiStoreMode ? _multiHubStatus.conflicts : _hubStatus.conflicts;
+
+  bool get _isInShopify =>
+      widget.isMultiStoreMode ? _multiHubStatus.inShopify : _hubStatus.inShopify;
+
+  String get _activeShopifyImageUrl =>
+      widget.isMultiStoreMode ? _multiHubStatus.shopifyImageUrl : _hubStatus.shopifyImageUrl;
+
+  String get _activeShopifyPublicUrl =>
+      widget.isMultiStoreMode ? _multiHubStatus.shopifyPublicUrl : _hubStatus.shopifyPublicUrl;
+
+  // Background removal is handled server-side via Replicate rembg (proxy /remove-bg)
 
   @override
   void initState() {
     super.initState();
     _initializeControllers();
-    _frontImageBase64 = widget.product.frontImageBase64;
-    _backImageBase64 = widget.product.backImageBase64;
-    _posTaxCode = widget.product.posTaxCode;
-    _posDepartmentName = widget.product.posDepartmentName;
-    _shopifyTags = List.from(widget.product.shopifyTags);
-    _categoryConfirmed = widget.product.categoryConfirmed;
+    _frontImageBase64 = widget.activeProduct.frontImageBase64;
+    _backImageBase64 = widget.activeProduct.backImageBase64;
+    _posTaxCode     = widget.activeProduct.posTaxCode;
+    _posDepartmentName = widget.activeProduct.posDepartmentName;
+    _shopifyTags = List.from(widget.activeProduct.shopifyTags);
+    _categoryConfirmed = widget.activeProduct.categoryConfirmed;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _hubEngine = ProductHubEngine(
@@ -112,18 +170,19 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   }
 
   void _initializeControllers() {
-    _nameController = TextEditingController(text: widget.product.name);
-    _skuController = TextEditingController(text: widget.product.sku);
-    _pcsPerCaseController = TextEditingController(text: widget.product.pcsPerCase.toString());
-    _pcsPerLineController = TextEditingController(text: widget.product.pcsPerLine.toString());
-    _storePriceController = TextEditingController(text: widget.product.storePrice.toString());
-    _onlinePriceController = TextEditingController(text: widget.product.onlinePrice.toString());
-    _storeCasePriceController = TextEditingController(text: widget.product.storeCasePrice.toString());
-    _onlineCasePriceController = TextEditingController(text: widget.product.onlineCasePrice.toString());
-    _pcCostController = TextEditingController(text: widget.product.pcCost.toString());
-    _caseCostController = TextEditingController(text: widget.product.caseCost.toString());
-    _minStockController = TextEditingController(text: widget.product.reorderRule.minStockPcs.toString());
-    _defaultOrderQtyController = TextEditingController(text: widget.product.reorderRule.defaultOrderQty.toString());
+    final p = widget.activeProduct;
+    _nameController = TextEditingController(text: p.name);
+    _skuController = TextEditingController(text: p.sku);
+    _pcsPerCaseController = TextEditingController(text: p.pcsPerCase.toString());
+    _pcsPerLineController = TextEditingController(text: p.pcsPerLine.toString());
+    _storePriceController = TextEditingController(text: p.storePrice.toString());
+    _onlinePriceController = TextEditingController(text: p.onlinePrice.toString());
+    _storeCasePriceController = TextEditingController(text: p.storeCasePrice.toString());
+    _onlineCasePriceController = TextEditingController(text: p.onlineCasePrice.toString());
+    _pcCostController = TextEditingController(text: p.pcCost.toString());
+    _caseCostController = TextEditingController(text: p.caseCost.toString());
+    _minStockController = TextEditingController(text: p.reorderRule.minStockPcs.toString());
+    _defaultOrderQtyController = TextEditingController(text: p.reorderRule.defaultOrderQty.toString());
   }
 
   @override
@@ -147,40 +206,103 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     final sku = _skuController.text.trim();
     if (sku.isEmpty || _hubEngine == null) return;
 
+    // In lookup mode, reset fields so they re-fill from the new SKU's data
+    if (widget.isLookupMode || sku != widget.activeProduct.sku) {
+      _nameController.clear();
+      _storePriceController.text = '0';
+      _onlinePriceController.text = '0';
+      _storeCasePriceController.text = '0';
+      _onlineCasePriceController.text = '0';
+      _pcCostController.text = '0';
+      _caseCostController.text = '0';
+      _pcsPerCaseController.text = '0';
+      _pcsPerLineController.text = '1';
+      _minStockController.text = '0';
+      _defaultOrderQtyController.text = '0';
+      _posTaxCode     = '1';
+      _posDepartmentName = '';
+      _shopifyTags = [];
+      _frontImageBase64 = '';
+      _backImageBase64 = '';
+      _categoryConfirmed = false;
+    }
+
     setState(() => _isHydrating = true);
 
     try {
-      final status = await _hubEngine!.hydrate(sku);
-      if (mounted) {
-        setState(() {
-          _hubStatus = status;
-          _isHydrating = false;
+      if (widget.isMultiStoreMode) {
+        // Lookup mode: hydrate ALL stores. Multi-store: only stores that carry the product.
+        final List<Store> relevantStores;
+        if (widget.isLookupMode) {
+          relevantStores = widget.allStores ?? [];
+        } else {
+          final productStoreIds = widget.crossStoreProduct?.storeRefs.keys.toSet() ?? {};
+          relevantStores = widget.allStores!.where((s) => productStoreIds.contains(s.id)).toList();
+        }
+        final status = await _hubEngine!.hydrateMultiStore(sku, relevantStores);
+        if (mounted) {
+          setState(() {
+            _multiHubStatus = status;
+            _isHydrating = false;
 
-          // Auto-fill from POS if found and fields are empty
-          if (status.inPlu && status.pluProduct != null) {
-            final plu = status.pluProduct!;
-            if (_nameController.text.isEmpty) _nameController.text = plu.desc;
-            _posTaxCode = plu.taxCode.isNotEmpty ? plu.taxCode : '1';
-            if (_posDepartmentName.isEmpty) _posDepartmentName = plu.deptName;
-            // Show POS price in store price if not set
-            if (_storePriceController.text == '0' || _storePriceController.text == '0.0') {
-              _storePriceController.text = plu.price;
+            // Auto-fill from the first found store's PLU
+            final firstFound = status.storeResults.values.where((r) => r.found).toList();
+            if (firstFound.isNotEmpty) {
+              final plu = firstFound.first.pluProduct!;
+              if (_nameController.text.isEmpty) _nameController.text = plu.desc;
+              _posTaxCode = plu.taxCode.isNotEmpty ? plu.taxCode : '1';
+              if (_posDepartmentName.isEmpty) _posDepartmentName = plu.deptName;
+              if (_storePriceController.text == '0' || _storePriceController.text == '0.0') {
+                _storePriceController.text = plu.price;
+              }
             }
-          }
 
-          // Auto-fill online price from Shopify if found
-          if (status.inShopify && status.shopifyProduct != null) {
-            final shopifyPrice = status.shopifyProduct!['price']?.toString() ?? '';
-            if ((_onlinePriceController.text == '0' || _onlinePriceController.text == '0.0') && shopifyPrice.isNotEmpty) {
-              _onlinePriceController.text = shopifyPrice;
+            // Auto-fill from Shopify
+            if (status.inShopify && status.shopifyProduct != null) {
+              final shopifyPrice = status.shopifyProduct!['price']?.toString() ?? '';
+              if ((_onlinePriceController.text == '0' || _onlinePriceController.text == '0.0') && shopifyPrice.isNotEmpty) {
+                _onlinePriceController.text = shopifyPrice;
+              }
+              final shopifyTags = List<String>.from(status.shopifyProduct!['tags'] ?? []);
+              if (_shopifyTags.isEmpty && shopifyTags.isNotEmpty) {
+                _shopifyTags = shopifyTags;
+              }
+              // Shopify taxable follows POS — no independent state to hydrate
             }
-            // Auto-fill tags from Shopify if we have none locally
-            final shopifyTags = List<String>.from(status.shopifyProduct!['tags'] ?? []);
-            if (_shopifyTags.isEmpty && shopifyTags.isNotEmpty) {
-              _shopifyTags = shopifyTags;
+          });
+        }
+      } else {
+        final status = await _hubEngine!.hydrate(sku);
+        if (mounted) {
+          setState(() {
+            _hubStatus = status;
+            _isHydrating = false;
+
+            // Auto-fill from POS if found and fields are empty
+            if (status.inPlu && status.pluProduct != null) {
+              final plu = status.pluProduct!;
+              if (_nameController.text.isEmpty) _nameController.text = plu.desc;
+              _posTaxCode = plu.taxCode.isNotEmpty ? plu.taxCode : '1';
+              if (_posDepartmentName.isEmpty) _posDepartmentName = plu.deptName;
+              if (_storePriceController.text == '0' || _storePriceController.text == '0.0') {
+                _storePriceController.text = plu.price;
+              }
             }
-          }
-        });
+
+            // Auto-fill online price from Shopify if found
+            if (status.inShopify && status.shopifyProduct != null) {
+              final shopifyPrice = status.shopifyProduct!['price']?.toString() ?? '';
+              if ((_onlinePriceController.text == '0' || _onlinePriceController.text == '0.0') && shopifyPrice.isNotEmpty) {
+                _onlinePriceController.text = shopifyPrice;
+              }
+              final shopifyTags = List<String>.from(status.shopifyProduct!['tags'] ?? []);
+              if (_shopifyTags.isEmpty && shopifyTags.isNotEmpty) {
+                _shopifyTags = shopifyTags;
+              }
+              // Shopify taxable follows POS — no independent state to hydrate
+            }
+          });
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -200,7 +322,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
           children: [
             Expanded(
               child: Text(
-                widget.product.name.isNotEmpty ? widget.product.name : 'New Product',
+                _nameController.text.isNotEmpty ? _nameController.text : (widget.activeProduct.name.isNotEmpty ? widget.activeProduct.name : 'Product Lookup'),
                 style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
                 overflow: TextOverflow.ellipsis,
               ),
@@ -228,7 +350,11 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
               padding: const EdgeInsets.symmetric(horizontal: DS.spaceLG, vertical: DS.spaceSM),
               color: DS.subtitleBar,
               child: Text(
-                '${widget.vendor.name}  ·  ${widget.store.name}',
+                widget.isLookupMode
+                    ? 'SKU Lookup  ·  ${widget.lookupSku}'
+                    : widget.crossStoreProduct != null
+                        ? '${widget.crossStoreProduct!.storeCount} stores  ·  SKU: ${widget.crossStoreProduct!.sku}'
+                        : '${widget.activeVendor.name}  ·  ${widget.activeStore.name}',
                 style: const TextStyle(fontSize: DS.fontSM, color: DS.textSubtitle, letterSpacing: 0.3),
               ),
             ),
@@ -243,14 +369,9 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
                     _buildSkuRow(),
 
                     // ═══════════════════════════════════════
-                    //  2. HYDRATION STATUS
-                    // ═══════════════════════════════════════
-                    _buildDetailedStatusSection(),
-
-                    // ═══════════════════════════════════════
                     //  3. CONFLICT ALERTS
                     // ═══════════════════════════════════════
-                    if (_hubStatus.hasConflicts) _buildFoldableConflictAlerts(),
+                    if (_activeConflicts.isNotEmpty) _buildFoldableConflictAlerts(),
 
                     // ═══════════════════════════════════════
                     //  4. NAME COMPARISON — POS vs Shopify
@@ -260,8 +381,14 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
                     // ═══════════════════════════════════════
                     //  5. POS vs SHOPIFY COMPARISON TABLE
                     // ═══════════════════════════════════════
-                    _sectionHeader('POS  vs  SHOPIFY  —  Comparison', Icons.compare_arrows),
-                    _buildComparisonTable(),
+                    _sectionHeader(
+                      widget.isMultiStoreMode
+                          ? 'MULTI-STORE  —  Comparison'
+                          : 'POS  vs  SHOPIFY  —  Comparison',
+                      Icons.compare_arrows),
+                    widget.isMultiStoreMode
+                        ? _buildMultiStoreComparisonTable()
+                        : _buildComparisonTable(),
 
                     // ═══════════════════════════════════════
                     //  6. SHOPIFY IMAGE + LOCAL CAPTURES
@@ -372,50 +499,32 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   // ═══════════════════════════════════════════════════════════
 
   Widget _buildNameComparison() {
-    final posName = _hubStatus.inPlu ? (_hubStatus.pluProduct?.desc ?? '—') : '—';
-    final shopifyName = _hubStatus.inShopify ? (_hubStatus.shopifyProduct?['productTitle']?.toString() ?? '—') : '—';
+    final String shopifyName;
+    if (widget.isMultiStoreMode) {
+      shopifyName = _multiHubStatus.inShopify ? (_multiHubStatus.shopifyProduct?['productTitle']?.toString() ?? '—') : '—';
+    } else {
+      shopifyName = _hubStatus.inShopify ? (_hubStatus.shopifyProduct?['productTitle']?.toString() ?? '—') : '—';
+    }
     final firebaseName = _nameController.text.isNotEmpty ? _nameController.text : '—';
-
-    final allSame = posName != '—' && shopifyName != '—' && posName.toLowerCase() == shopifyName.toLowerCase();
 
     return Container(
       margin: const EdgeInsets.fromLTRB(4, 2, 4, 0),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: allSame ? DS.successLight : DS.warningBorder, width: 1),
-      ),
+      color: Colors.white,
       child: Column(
         children: [
-          // Header
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: allSame ? DS.successBg : DS.warningBg,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(5)),
+          // Per-store POS names in multi-store mode
+          if (widget.isMultiStoreMode) ...[
+            ..._multiHubStatus.storeResults.values.where((r) => r.found).map((r) =>
+              _nameRow('${r.storeName}', r.pluProduct?.desc ?? '—', DS.posColor, Icons.point_of_sale),
             ),
-            child: Row(
-              children: [
-                Icon(allSame ? Icons.check_circle : Icons.info_outline, size: 14,
-                    color: allSame ? DS.successColor : DS.warningDark),
-                const SizedBox(width: 6),
-                Text(
-                  allSame ? 'Names match across systems' : 'Product Names',
-                  style: TextStyle(
-                    fontSize: 11, fontWeight: FontWeight.w700,
-                    color: allSame ? DS.successColor : DS.warningDeep,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // POS
-          _nameRow('POS (Penny Lane)', posName, DS.posColor, Icons.point_of_sale),
+          ] else ...[
+            _nameRow('POS (Penny Lane)',
+              _hubStatus.inPlu ? (_hubStatus.pluProduct?.desc ?? '—') : '—',
+              DS.posColor, Icons.point_of_sale),
+          ],
           const Divider(height: 0.5, thickness: 0.5, color: DS.dividerColor),
-          // Shopify
           _nameRow('Shopify (apniroots)', shopifyName, DS.shopifyColor, Icons.shopping_bag_outlined),
           const Divider(height: 0.5, thickness: 0.5, color: DS.dividerColor),
-          // Firebase
           _nameRow('Firebase (Your Data)', firebaseName, DS.firebaseColor, Icons.cloud),
         ],
       ),
@@ -449,17 +558,13 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     final hasPOS = _hubStatus.inPlu && _hubStatus.pluProduct != null;
     final hasShopify = _hubStatus.inShopify && _hubStatus.shopifyProduct != null;
 
-    if (!hasPOS && !hasShopify) {
+    if (!hasPOS && !hasShopify && _skuController.text.isEmpty) {
       return Container(
         padding: const EdgeInsets.all(16),
         color: Colors.white,
         child: Center(
-          child: Text(
-            _skuController.text.isEmpty
-                ? 'Enter a SKU to see comparison'
-                : _isHydrating ? 'Loading…' : 'No data found in POS or Shopify',
-            style: TextStyle(fontSize: 12, color: Colors.grey[400], fontStyle: FontStyle.italic),
-          ),
+          child: Text('Enter a SKU to see comparison',
+            style: TextStyle(fontSize: 12, color: Colors.grey[400], fontStyle: FontStyle.italic)),
         ),
       );
     }
@@ -467,16 +572,8 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     final plu = _hubStatus.pluProduct;
     final shopify = _hubStatus.shopifyProduct;
 
-    // Build comparison rows: [label, posValue, shopifyValue, isConflict]
-    final rows = <_CompRow>[
-      _CompRow('Price', hasPOS ? '\$${plu!.price}' : '—', hasShopify ? '\$${shopify!['price']}' : '—'),
-      _CompRow('Department / Tag', hasPOS ? plu!.deptName : '—', hasShopify ? (shopify!['tags'] as List?)?.join(', ') ?? '—' : '—'),
-      _CompRow('Tax', hasPOS ? plu!.taxLabel : '—', hasShopify ? ((shopify!['taxable'] as bool? ?? true) ? 'Taxable' : 'Non-Taxable') : '—',
-          semanticMatch: hasPOS && hasShopify && plu!.isTaxable == (shopify!['taxable'] as bool? ?? true)),
-      _CompRow('Vendor', hasPOS ? plu!.vendName : '—', hasShopify ? (shopify!['vendor']?.toString() ?? '—') : '—'),
-      _CompRow('Cost (pc)', hasPOS ? '\$${plu!.cost}' : '—', '—'), // Shopify doesn't store cost
-      _CompRow('Items in Box', _pcsPerCaseController.text, '—'),  // Only in Firebase
-    ];
+    final shopifyTaxable = hasShopify ? (_hubStatus.shopifyProduct!['taxable'] as bool? ?? true) : null;
+    final posDepts = _hubEngine?.posDepartments ?? [];
 
     return Container(
       decoration: const BoxDecoration(
@@ -486,29 +583,555 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
       child: Column(
         children: [
           // Column headers
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
-            child: Row(
+          Row(
+            children: [
+              _compColHeader('', flex: 2, color: DS.chipSlate),
+              _compColHeader('POS', flex: 3, color: DS.posColor, icon: Icons.point_of_sale,
+                  checked: _hubStatus.pluChecked, found: _hubStatus.inPlu),
+              _compColHeader('SHOPIFY', flex: 3, color: DS.shopifyDark, icon: Icons.shopping_bag_outlined,
+                  checked: _hubStatus.shopifyChecked, found: _hubStatus.inShopify),
+            ],
+          ),
+
+          // ── Price (piece) ──
+          _compEditableRow(
+            'Price (pc)',
+            posReadOnly: hasPOS ? '\$${plu!.price}' : null,
+            shopifyReadOnly: hasShopify ? '\$${shopify!['price']}' : null,
+            posEdit: _gridInput(_storePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: _gridInput(_onlinePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+          ),
+
+          // ── Price (case) ──
+          _compEditableRow(
+            'Price (cs)',
+            posEdit: _gridInput(_storeCasePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: _gridInput(_onlineCasePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+          ),
+
+          // ── Department / Tag ──
+          _compEditableRow(
+            'Dept / Tag',
+            posReadOnly: hasPOS ? plu!.deptName : null,
+            shopifyReadOnly: hasShopify ? (shopify!['tags'] as List?)?.join(', ') : null,
+            posEdit: SizedBox(
+              height: 32,
+              child: posDepts.isNotEmpty
+                  ? DropdownButtonFormField<String>(
+                      value: _posDepartmentName.isNotEmpty && posDepts.contains(_posDepartmentName) ? _posDepartmentName : null,
+                      items: posDepts.map((d) => DropdownMenuItem(value: d, child: Text(d, style: const TextStyle(fontSize: 10)))).toList(),
+                      onChanged: (val) => setState(() => _posDepartmentName = val ?? ''),
+                      decoration: const InputDecoration(hintText: 'Dept', hintStyle: TextStyle(fontSize: 9),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 6), border: InputBorder.none, isDense: true),
+                      isExpanded: true, style: const TextStyle(fontSize: 10, color: Colors.black87),
+                    )
+                  : null,
+            ),
+            shopifyEdit: Wrap(
+              spacing: 3, runSpacing: 2,
               children: [
-                _compColHeader('', flex: 2, color: DS.chipSlate),
-                _compColHeader('POS', flex: 3, color: DS.posColor, icon: Icons.point_of_sale),
-                _compColHeader('SHOPIFY', flex: 3, color: DS.shopifyDark, icon: Icons.shopping_bag_outlined),
+                ..._shopifyTags.map((tag) => Chip(
+                  label: Text(tag, style: const TextStyle(fontSize: 8)),
+                  deleteIcon: const Icon(Icons.close, size: 10),
+                  onDeleted: () => setState(() => _shopifyTags.remove(tag)),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: EdgeInsets.zero, backgroundColor: DS.shopifyChipBg,
+                  side: const BorderSide(color: DS.successBorder, width: 0.5),
+                )),
+                ActionChip(
+                  avatar: const Icon(Icons.add, size: 10, color: DS.successColor),
+                  label: const Text('Add', style: TextStyle(fontSize: 8, color: DS.successColor)),
+                  onPressed: _addShopifyTag,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  side: const BorderSide(color: DS.successBorder, width: 0.5),
+                  backgroundColor: Colors.white,
+                ),
               ],
             ),
           ),
-          // Data rows
-          ...rows.map((r) {
-            final isConflict = !r.semanticMatch &&
-                r.posValue != '—' && r.shopifyValue != '—' &&
-                r.posValue.toLowerCase() != r.shopifyValue.toLowerCase();
-            return _compDataRow(r.label, r.posValue, r.shopifyValue, isConflict: isConflict);
-          }),
+
+          // ── Tax ──
+          _compEditableRow(
+            'Tax',
+            posReadOnly: hasPOS ? plu!.taxLabel : null,
+            shopifyReadOnly: hasShopify ? (shopifyTaxable! ? 'Taxable' : 'Non-Taxable') : null,
+            isConflict: hasPOS && hasShopify && plu!.isTaxable != shopifyTaxable,
+            posEdit: Wrap(
+              spacing: 4,
+              children: POSTaxCode.allCodes.map((code) {
+                final isSelected = _posTaxCode == code;
+                return ChoiceChip(
+                  label: Text(POSTaxCode.label(code),
+                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+                          color: isSelected ? Colors.white : DS.textLabel)),
+                  selected: isSelected, selectedColor: DS.posColor, backgroundColor: DS.neutralBg,
+                  onSelected: (s) { if (s) setState(() => _posTaxCode = code); },
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 1),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                );
+              }).toList(),
+            ),
+            shopifyEdit: Text(
+              POSTaxCode.isTaxable(_posTaxCode) ? 'Taxable (follows POS)' : 'Non-Taxable (follows POS)',
+              style: TextStyle(fontSize: 10, color: DS.textMuted),
+            ),
+          ),
+
+          // ── Vendor ──
+          _compDataRow('Vendor',
+            hasPOS ? plu!.vendName : '—',
+            hasShopify ? (shopify!['vendor']?.toString() ?? '—') : '—'),
+
+          // ── Cost ──
+          _compEditableRow(
+            'Cost (pc)',
+            posReadOnly: hasPOS ? '\$${plu!.cost}' : null,
+            posEdit: _gridInput(_pcCostController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: const SizedBox.shrink(),
+          ),
+
+          // ── Cost (case) ──
+          _compEditableRow(
+            'Cost (cs)',
+            posEdit: _gridInput(_caseCostController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: const SizedBox.shrink(),
+          ),
+
+          // ── Items in Box ──
+          _compEditableRow(
+            'Pcs / Case',
+            posEdit: _gridInput(_pcsPerCaseController, textAlign: TextAlign.right,
+                keyboardType: TextInputType.number),
+            shopifyEdit: const SizedBox.shrink(),
+          ),
         ],
       ),
     );
   }
 
-  Widget _compColHeader(String label, {required int flex, required Color color, IconData? icon}) {
+  // ═══════════════════════════════════════════════════════════
+  //  MULTI-STORE COMPARISON TABLE — dynamic columns per store + Shopify
+  // ═══════════════════════════════════════════════════════════
+
+  Widget _buildMultiStoreComparisonTable() {
+    // Lookup mode: show all stores. Multi-store: only stores that carry the product.
+    final List<Store> stores;
+    if (widget.isLookupMode) {
+      stores = widget.allStores ?? [];
+    } else {
+      final productStoreIds = widget.crossStoreProduct?.storeRefs.keys.toSet() ?? {};
+      stores = widget.allStores!.where((s) => productStoreIds.contains(s.id)).toList();
+    }
+    final status = _multiHubStatus;
+    final hasShopify = status.inShopify && status.shopifyProduct != null;
+    final shopify = status.shopifyProduct;
+    final shopifyTaxable = hasShopify ? (shopify!['taxable'] as bool? ?? true) : null;
+
+    if (stores.isEmpty && _skuController.text.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        color: Colors.white,
+        child: Center(
+          child: Text('Enter a SKU to see comparison',
+            style: TextStyle(fontSize: 12, color: Colors.grey[400], fontStyle: FontStyle.italic)),
+        ),
+      );
+    }
+
+    final posDepts = _hubEngine?.posDepartments ?? [];
+    // Calculate column width: label(100) + stores(140 each) + shopify(140)
+    final colW = 140.0;
+    final totalWidth = 100.0 + stores.length * colW + colW;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final needsScroll = totalWidth > screenWidth;
+
+    Widget buildTable() {
+      return Column(
+        children: [
+          // ── Column headers ──
+          Row(
+            children: [
+              _multiColHeader('', width: 100, color: DS.chipSlate),
+              ...stores.map((s) {
+                final result = status.storeResults[s.id];
+                return _multiColHeader(
+                  s.name, width: colW, color: DS.posColor,
+                  icon: Icons.point_of_sale,
+                  checked: result?.checked, found: result?.found,
+                );
+              }),
+              _multiColHeader('SHOPIFY', width: colW, color: DS.shopifyDark,
+                icon: Icons.shopping_bag_outlined,
+                checked: status.shopifyChecked, found: status.inShopify),
+            ],
+          ),
+
+          // ── Price (pc) ──
+          _multiEditableRow2('Price (pc)', stores, status, colW,
+            storeHint: (r) => r.found ? '\$${r.pluProduct?.price ?? ''}' : null,
+            shopifyHint: hasShopify ? '\$${shopify!['price']}' : null,
+            storeEdit: _gridInput(_storePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: _gridInput(_onlinePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true))),
+
+          // ── Price (cs) ──
+          _multiEditableRow2('Price (cs)', stores, status, colW,
+            storeEdit: _gridInput(_storeCasePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: _gridInput(_onlineCasePriceController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true))),
+
+          // ── Department / Tag ──
+          _multiEditableRow2('Dept / Tag', stores, status, colW,
+            storeHint: (r) => r.found ? (r.pluProduct?.deptName ?? null) : null,
+            shopifyHint: hasShopify ? ((shopify!['tags'] as List?)?.join(', ')) : null,
+            storeEdit: SizedBox(
+              height: 32,
+              child: posDepts.isNotEmpty
+                  ? DropdownButtonFormField<String>(
+                      value: _posDepartmentName.isNotEmpty && posDepts.contains(_posDepartmentName) ? _posDepartmentName : null,
+                      items: posDepts.map((d) => DropdownMenuItem(value: d, child: Text(d, style: const TextStyle(fontSize: 10)))).toList(),
+                      onChanged: (val) => setState(() => _posDepartmentName = val ?? ''),
+                      decoration: const InputDecoration(hintText: 'Dept', hintStyle: TextStyle(fontSize: 9),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 6), border: InputBorder.none, isDense: true),
+                      isExpanded: true, style: const TextStyle(fontSize: 10, color: Colors.black87),
+                    )
+                  : null,
+            ),
+            shopifyEdit: Wrap(
+              spacing: 3, runSpacing: 2,
+              children: [
+                ..._shopifyTags.map((tag) => Chip(
+                  label: Text(tag, style: const TextStyle(fontSize: 8)),
+                  deleteIcon: const Icon(Icons.close, size: 10),
+                  onDeleted: () => setState(() => _shopifyTags.remove(tag)),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: EdgeInsets.zero, backgroundColor: DS.shopifyChipBg,
+                  side: const BorderSide(color: DS.successBorder, width: 0.5),
+                )),
+                ActionChip(
+                  avatar: const Icon(Icons.add, size: 10, color: DS.successColor),
+                  label: const Text('Add', style: TextStyle(fontSize: 8, color: DS.successColor)),
+                  onPressed: _addShopifyTag,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  side: const BorderSide(color: DS.successBorder, width: 0.5),
+                  backgroundColor: Colors.white,
+                ),
+              ],
+            )),
+
+          // ── Tax ──
+          _multiEditableRow2('Tax', stores, status, colW,
+            storeHint: (r) => r.found ? (r.pluProduct?.taxLabel) : null,
+            shopifyHint: hasShopify ? (shopifyTaxable! ? 'Taxable' : 'Non-Taxable') : null,
+            storeEdit: Wrap(
+              spacing: 4,
+              children: POSTaxCode.allCodes.map((code) {
+                final isSelected = _posTaxCode == code;
+                return ChoiceChip(
+                  label: Text(POSTaxCode.label(code),
+                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+                          color: isSelected ? Colors.white : DS.textLabel)),
+                  selected: isSelected, selectedColor: DS.posColor, backgroundColor: DS.neutralBg,
+                  onSelected: (s) { if (s) setState(() => _posTaxCode = code); },
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 1),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                );
+              }).toList(),
+            ),
+            shopifyEdit: Text(
+              POSTaxCode.isTaxable(_posTaxCode) ? 'Taxable (follows POS)' : 'Non-Taxable (follows POS)',
+              style: TextStyle(fontSize: 10, color: DS.textMuted),
+            )),
+
+          // ── Vendor ──
+          _multiDataRow('Vendor', stores, status,
+            storeValue: (r) => r.found ? (r.pluProduct?.vendName ?? '—') : '—',
+            shopifyValue: hasShopify ? (shopify!['vendor']?.toString() ?? '—') : '—'),
+
+          // ── Cost (pc) ──
+          _multiEditableRow2('Cost (pc)', stores, status, colW,
+            storeHint: (r) => r.found ? '\$${r.pluProduct?.cost ?? ''}' : null,
+            storeEdit: _gridInput(_pcCostController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: const SizedBox.shrink()),
+
+          // ── Cost (cs) ──
+          _multiEditableRow2('Cost (cs)', stores, status, colW,
+            storeEdit: _gridInput(_caseCostController, prefix: '\$', textAlign: TextAlign.right,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true)),
+            shopifyEdit: const SizedBox.shrink()),
+
+          // ── Pcs / Case ──
+          _multiEditableRow2('Pcs / Case', stores, status, colW,
+            storeEdit: _gridInput(_pcsPerCaseController, textAlign: TextAlign.right,
+                keyboardType: TextInputType.number),
+            shopifyEdit: const SizedBox.shrink()),
+        ],
+      );
+    }
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
+      ),
+      child: needsScroll
+          ? SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SizedBox(width: totalWidth, child: buildTable()),
+            )
+          : buildTable(),
+    );
+  }
+
+  Widget _multiColHeader(String label, {
+    required double width, required Color color,
+    IconData? icon, bool? checked, bool? found,
+  }) {
+    return SizedBox(
+      width: width,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: DS.sectionHeaderPadV),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.08),
+          border: const Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (checked != null) ...[
+              if (_isHydrating && !checked)
+                const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5))
+              else
+                Icon(Icons.circle, size: 10,
+                  color: checked ? (found! ? DS.successColor : DS.conflictColor) : Colors.grey[300]),
+              const SizedBox(width: 3),
+            ],
+            if (icon != null) ...[
+              Icon(icon, size: DS.iconXS, color: color),
+              const SizedBox(width: 3),
+            ],
+            Flexible(
+              child: Text(label,
+                style: DS.compHeaderStyle(color),
+                overflow: TextOverflow.ellipsis, maxLines: 1),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _multiDataRow(String label, List<Store> stores, MultiStoreHubStatus status, {
+    required String Function(StorePLUResult) storeValue,
+    required String shopifyValue,
+  }) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: DS.cardBg,
+        border: Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
+      ),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Label
+            SizedBox(
+              width: 100,
+              child: Container(
+                color: _labelBg,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: DS.compRowPadV),
+                alignment: Alignment.centerLeft,
+                child: Text(label, style: DS.compLabelStyle()),
+              ),
+            ),
+            Container(width: 0.5, color: _gridColor),
+            // Store columns
+            ...stores.map((s) {
+              final result = status.storeResults[s.id];
+              final val = result != null ? storeValue(result) : '—';
+              return [
+                SizedBox(
+                  width: 140,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: DS.compRowPadV),
+                    alignment: Alignment.center,
+                    child: Text(val,
+                      style: val == '—' ? DS.valueMutedStyle : DS.valueStyle,
+                      textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis),
+                  ),
+                ),
+                Container(width: 0.5, color: _gridColor),
+              ];
+            }).expand((widgets) => widgets),
+            // Shopify column
+            SizedBox(
+              width: 140,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: DS.compRowPadV),
+                alignment: Alignment.center,
+                child: Text(shopifyValue,
+                  style: shopifyValue == '—' ? DS.valueMutedStyle : DS.valueStyle,
+                  textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Multi-store editable row: each store column shows a hint (from PLU) + editable input,
+  /// Shopify column shows a hint + editable input.
+  Widget _multiEditableRow2(String label, List<Store> stores, MultiStoreHubStatus status, double colW, {
+    String? Function(StorePLUResult)? storeHint,
+    String? shopifyHint,
+    required Widget storeEdit,
+    required Widget shopifyEdit,
+  }) {
+    Widget buildEditCell(String? hint, Widget edit, double width) {
+      return SizedBox(
+        width: width,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (hint != null && hint.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 1),
+                  child: Text(hint,
+                    style: const TextStyle(fontSize: 9, color: Colors.grey, fontStyle: FontStyle.italic),
+                    textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis),
+                ),
+              edit,
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: DS.cardBg,
+        border: Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
+      ),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Label
+            SizedBox(
+              width: 100,
+              child: Container(
+                color: _labelBg,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: DS.compRowPadV),
+                alignment: Alignment.centerLeft,
+                child: Text(label, style: DS.compLabelStyle()),
+              ),
+            ),
+            Container(width: 0.5, color: _gridColor),
+            // Store columns — hint + editable
+            ...stores.map((s) {
+              final result = status.storeResults[s.id];
+              final hint = (result != null && storeHint != null) ? storeHint(result) : null;
+              return [
+                buildEditCell(hint, storeEdit, colW),
+                Container(width: 0.5, color: _gridColor),
+              ];
+            }).expand((w) => w),
+            // Shopify column — hint + editable
+            buildEditCell(shopifyHint, shopifyEdit, colW),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A comparison row with read-only system values shown as small hints and editable inputs below.
+  Widget _compEditableRow(String label, {
+    String? posReadOnly, String? shopifyReadOnly,
+    required Widget posEdit, required Widget shopifyEdit,
+    bool isConflict = false,
+  }) {
+    final bgColor = isConflict ? DS.errorBg : DS.cardBg;
+    Widget buildCell(String? readOnly, Widget edit) {
+      return Expanded(
+        flex: 3,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (readOnly != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Text(readOnly,
+                    style: TextStyle(fontSize: 9, color: Colors.grey[500], fontStyle: FontStyle.italic),
+                    textAlign: TextAlign.center),
+                ),
+              edit,
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: bgColor,
+        border: const Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
+      ),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Label
+            Expanded(
+              flex: 2,
+              child: Container(
+                color: _labelBg,
+                padding: const EdgeInsets.symmetric(horizontal: DS.spaceMD, vertical: DS.compRowPadV),
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  children: [
+                    if (isConflict)
+                      const Padding(
+                        padding: EdgeInsets.only(right: DS.spaceXS),
+                        child: Icon(Icons.warning_amber_rounded, size: DS.iconXS, color: DS.conflictColor),
+                      ),
+                    Expanded(child: Text(label, style: DS.compLabelStyle(isConflict: isConflict))),
+                  ],
+                ),
+              ),
+            ),
+            Container(width: 0.5, color: _gridColor),
+            buildCell(posReadOnly, posEdit),
+            Container(width: 0.5, color: _gridColor),
+            buildCell(shopifyReadOnly, shopifyEdit),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _compColHeader(String label, {required int flex, required Color color, IconData? icon, bool? checked, bool? found}) {
     return Expanded(
       flex: flex,
       child: Container(
@@ -520,6 +1143,14 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            if (checked != null) ...[
+              if (_isHydrating && !checked)
+                const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5))
+              else
+                Icon(Icons.circle, size: 10,
+                  color: checked ? (found! ? DS.successColor : DS.conflictColor) : Colors.grey[300]),
+              const SizedBox(width: DS.spaceXS),
+            ],
             if (icon != null) ...[
               Icon(icon, size: DS.iconXS, color: color),
               const SizedBox(width: DS.spaceXS),
@@ -599,7 +1230,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: Column(
-        children: _hubStatus.conflicts.map((conflict) {
+        children: _activeConflicts.map((conflict) {
           final isCrit = conflict.isCritical;
           final color = isCrit ? DS.conflictColor : DS.warningColor;
           final bg = isCrit ? DS.errorBg : DS.warningBg;
@@ -643,13 +1274,13 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   /// Foldable conflict alerts — auto-expanded when critical errors exist,
   /// collapsed by default when only info/warnings (notes)
   Widget _buildFoldableConflictAlerts() {
-    final hasCritical = _hubStatus.conflicts.any((c) => c.isCritical);
+    final hasCritical = _activeConflicts.any((c) => c.isCritical);
 
     // If there are critical errors, always show expanded
     if (hasCritical) return _buildConflictAlerts();
 
     // Otherwise, notes only — make foldable
-    final noteCount = _hubStatus.conflicts.length;
+    final noteCount = _activeConflicts.length;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       child: Column(
@@ -733,24 +1364,51 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
           // ── Product Name ──
           _gridRow('Product Name', child: _gridInput(_nameController, validator: (v) => v?.isEmpty == true ? 'Required' : null)),
 
+          // ── Order List Name (locked — never overwritten by SKU scan) ──
+          _gridRow('Order List Name', child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: DS.spaceL, vertical: DS.spaceMD),
+            alignment: Alignment.centerLeft,
+            color: const Color(0xFFF0FDF4), // light green tint — read-only
+            child: Text(
+              widget.activeProduct.orderListProductName.isNotEmpty
+                  ? widget.activeProduct.orderListProductName
+                  : widget.activeProduct.name,
+              style: const TextStyle(
+                fontSize: DS.fontM,
+                fontWeight: DS.weightSemi,
+                color: Color(0xFF166534), // green 800
+              ),
+            ),
+          )),
+
           // ── Packaging ──
           _priceSubHeader('PACKAGING', Icons.inventory_2_outlined, DS.chipSlate),
-          _gridDoubleRow('Pcs / Case', _pcsPerCaseController, 'Pcs / Line', _pcsPerLineController, isNumber: true),
-
-          // ── Pricing ──
-          _buildSplitPricingSection(),
-
-          // ── Tax ──
-          _priceSubHeader('TAX', Icons.receipt_long_outlined, DS.subLabel),
-          _buildTaxSection(),
-
-          // ── Categories ──
-          _priceSubHeader('CATEGORIES', Icons.category_outlined, DS.subLabel),
-          _buildCategorySection(),
+          _gridRow('Pcs / Line', child: _gridInput(_pcsPerLineController, keyboardType: TextInputType.number, textAlign: TextAlign.right)),
 
           // ── Reorder Rules ──
           _priceSubHeader('REORDER', Icons.autorenew_rounded, DS.subLabel),
           _gridDoubleRow('Min Stock (pcs)', _minStockController, 'Default Order (cs)', _defaultOrderQtyController, isNumber: true),
+
+          // ── Mapping Confirmed ──
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _gridColor, width: 0.5))),
+            child: InkWell(
+              onTap: () => setState(() => _categoryConfirmed = !_categoryConfirmed),
+              child: Row(
+                children: [
+                  SizedBox(width: 20, height: 20, child: Checkbox(
+                    value: _categoryConfirmed,
+                    onChanged: (val) => setState(() => _categoryConfirmed = val ?? false),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  )),
+                  const SizedBox(width: 6),
+                  const Text('Mapping confirmed', style: TextStyle(fontSize: 10, color: DS.textMuted)),
+                ],
+              ),
+            ),
+          ),
 
           // ── Quick Actions (Label + Sync) ──
           _buildQuickActionsRow(),
@@ -766,6 +1424,11 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   Widget _buildQuickActionsRow() {
     final sku = _skuController.text.trim();
     final hasData = sku.isNotEmpty;
+    final canShopify = context.read<AuthProvider>().hasPermission(AppRoles.pushShopify);
+    final canPos     = context.read<AuthProvider>().hasPermission(AppRoles.pushPos);
+
+    // If user has no push permissions, hide the row entirely
+    if (!canShopify && !canPos) return const SizedBox.shrink();
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -774,112 +1437,63 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
       ),
       child: Row(
         children: [
-          // Label request — compact
-          if (hasData)
+          // Shopify sync
+          if (canShopify) ...[
             Expanded(
-              child: PopupMenuButton<String>(
-                onSelected: (reason) => _addToLabelQueue(reason),
-                offset: const Offset(0, -120),
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'missing', child: Text('🏷️  Missing label', style: TextStyle(fontSize: 12))),
-                  PopupMenuItem(value: 'wrong_price', child: Text('💲  Wrong price', style: TextStyle(fontSize: 12))),
-                  PopupMenuItem(value: 'new_product', child: Text('🆕  New product', style: TextStyle(fontSize: 12))),
-                  PopupMenuItem(value: 'damaged', child: Text('🔧  Damaged', style: TextStyle(fontSize: 12))),
-                ],
+              child: InkWell(
+                onTap: (hasData && !_isSyncingShopify) ? _syncToShopify : null,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                  decoration: DS.outlinedPill(DS.labelColor),
-                  child: const Row(
+                  padding: const EdgeInsets.symmetric(horizontal: DS.spaceMD, vertical: DS.spaceSM),
+                  decoration: DS.filledPill(DS.shopifyColor, bgOpacity: hasData ? 0.1 : 0.04, borderOpacity: hasData ? 0.4 : 0.15),
+                  child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.label_outline, size: DS.iconM, color: DS.labelColor),
-                      SizedBox(width: DS.spaceS),
-                      Text('Label', style: TextStyle(fontSize: DS.fontSM, fontWeight: DS.weightSemi, color: DS.labelColor)),
+                      if (_isSyncingShopify)
+                        const SizedBox(width: DS.iconS, height: DS.iconS, child: CircularProgressIndicator(strokeWidth: 2, color: DS.shopifyColor))
+                      else
+                        Icon(Icons.shopping_bag_outlined, size: DS.iconM, color: Color(hasData ? 0xFF4D7C0F : 0xFFBBBBBB)),
+                      const SizedBox(width: DS.spaceS),
+                      Text(
+                        _isSyncingShopify ? 'Syncing…' : _isInShopify ? 'Update Shopify' : 'Shopify',
+                        style: DS.actionBtnStyle(Color(hasData ? 0xFF4D7C0F : 0xFFBBBBBB)),
+                      ),
                     ],
                   ),
                 ),
               ),
             ),
-          if (hasData) const SizedBox(width: 6),
-          // Shopify sync
-          Expanded(
-            child: InkWell(
-              onTap: (hasData && !_isSyncingShopify) ? _syncToShopify : null,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: DS.spaceMD, vertical: DS.spaceSM),
-                decoration: DS.filledPill(DS.shopifyColor, bgOpacity: hasData ? 0.1 : 0.04, borderOpacity: hasData ? 0.4 : 0.15),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (_isSyncingShopify)
-                      const SizedBox(width: DS.iconS, height: DS.iconS, child: CircularProgressIndicator(strokeWidth: 2, color: DS.shopifyColor))
-                    else
-                      Icon(Icons.shopping_bag_outlined, size: DS.iconM, color: Color(hasData ? 0xFF4D7C0F : 0xFFBBBBBB)),
-                    const SizedBox(width: DS.spaceS),
-                    Text(
-                      _isSyncingShopify ? 'Syncing…' : _hubStatus.inShopify ? 'Update Shopify' : 'Shopify',
-                      style: DS.actionBtnStyle(Color(hasData ? 0xFF4D7C0F : 0xFFBBBBBB)),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 6),
+            if (canPos) const SizedBox(width: 6),
+          ],
           // POS Export
-          Expanded(
-            child: InkWell(
-              onTap: (hasData && !_isExportingPOS) ? _exportToPOS : null,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: DS.spaceMD, vertical: DS.spaceSM),
-                decoration: DS.filledPill(DS.posColor, bgOpacity: hasData ? 0.08 : 0.03, borderOpacity: hasData ? 0.3 : 0.1),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (_isExportingPOS)
-                      const SizedBox(width: DS.iconS, height: DS.iconS, child: CircularProgressIndicator(strokeWidth: 2, color: DS.posColor))
-                    else
-                      Icon(Icons.point_of_sale, size: DS.iconM, color: hasData ? DS.posColor : DS.textDisabled),
-                    const SizedBox(width: DS.spaceS),
-                    Text(
-                      _isExportingPOS ? 'Exporting…' : 'POS',
-                      style: DS.actionBtnStyle(hasData ? DS.posColor : DS.textDisabled),
-                    ),
-                  ],
+          if (canPos)
+            Expanded(
+              child: InkWell(
+                onTap: (hasData && !_isExportingPOS) ? _exportToPOS : null,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: DS.spaceMD, vertical: DS.spaceSM),
+                  decoration: DS.filledPill(DS.posColor, bgOpacity: hasData ? 0.08 : 0.03, borderOpacity: hasData ? 0.3 : 0.1),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      if (_isExportingPOS)
+                        const SizedBox(width: DS.iconS, height: DS.iconS, child: CircularProgressIndicator(strokeWidth: 2, color: DS.posColor))
+                      else
+                        Icon(Icons.point_of_sale, size: DS.iconM, color: hasData ? DS.posColor : DS.textDisabled),
+                      const SizedBox(width: DS.spaceS),
+                      Text(
+                        _isExportingPOS ? 'Exporting…' : 'POS',
+                        style: DS.actionBtnStyle(hasData ? DS.posColor : DS.textDisabled),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  //  SPLIT PRICING — Store vs Online
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _buildSplitPricingSection() {
-    return Column(
-      children: [
-        // ── STORE (→ POS) ──
-        _priceSubHeader('STORE  →  POS', Icons.point_of_sale, DS.posColor,
-          trailing: (_hubStatus.inPlu && _hubStatus.pluProduct != null)
-              ? 'POS: \$${_hubStatus.pluProduct!.price}' : null,
-        ),
-        _gridDoubleRow('Piece', _storePriceController, 'Case', _storeCasePriceController, prefix: '\$', isDecimal: true),
-        // ── ONLINE (→ Shopify) ──
-        _priceSubHeader('ONLINE  →  Shopify', Icons.shopping_bag_outlined, DS.successColor,
-          trailing: (_hubStatus.inShopify && _hubStatus.shopifyProduct != null)
-              ? 'Shopify: \$${_hubStatus.shopifyProduct!['price'] ?? ''}' : null,
-        ),
-        _gridDoubleRow('Piece', _onlinePriceController, 'Case', _onlineCasePriceController, prefix: '\$', isDecimal: true),
-        // ── COST ──
-        _priceSubHeader('COST', Icons.account_balance_wallet_outlined, DS.chipSlate),
-        _gridDoubleRow('Piece', _pcCostController, 'Case', _caseCostController, prefix: '\$', isDecimal: true),
-      ],
-    );
-  }
 
   Widget _priceSubHeader(String label, IconData icon, Color color, {String? trailing}) {
     return Container(
@@ -902,241 +1516,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  //  TAX SECTION — POS is master
-  // ═══════════════════════════════════════════════════════════
 
-  Widget _buildTaxSection() {
-    final posHasTax = _hubStatus.inPlu && _hubStatus.pluProduct != null;
-    final shopifyHasTax = _hubStatus.inShopify && _hubStatus.shopifyProduct != null;
-    final shopifyTaxable = shopifyHasTax ? (_hubStatus.shopifyProduct!['taxable'] as bool? ?? true) : null;
-    final posIsTaxable = posHasTax ? POSTaxCode.isTaxable(_hubStatus.pluProduct!.taxCode) : null;
-    final isMismatch = posIsTaxable != null && shopifyTaxable != null && posIsTaxable != shopifyTaxable;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Compact read-only row for POS + Shopify tax
-          if (posHasTax || shopifyHasTax)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              margin: const EdgeInsets.only(bottom: 6),
-              decoration: BoxDecoration(
-                color: isMismatch ? DS.errorLightBg : DS.infoBg,
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: isMismatch ? DS.errorLight : DS.infoBorder, width: 0.5),
-              ),
-              child: Row(
-                children: [
-                  if (posHasTax) ...[
-                    const Icon(Icons.point_of_sale, size: 12, color: DS.posColor),
-                    const SizedBox(width: 4),
-                    Text(POSTaxCode.label(_hubStatus.pluProduct!.taxCode),
-                        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: DS.posColor)),
-                    Container(
-                      margin: const EdgeInsets.only(left: 4),
-                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                      decoration: DS.badgeDecoration(DS.posColor),
-                      child: const Text('MASTER', style: DS.badgeStyle),
-                    ),
-                  ],
-                  if (posHasTax && shopifyHasTax) ...[
-                    Container(width: 1, height: 16, color: DS.gridColor, margin: const EdgeInsets.symmetric(horizontal: 8)),
-                  ],
-                  if (shopifyHasTax) ...[
-                    const Icon(Icons.shopping_bag_outlined, size: 12, color: DS.successColor),
-                    const SizedBox(width: 4),
-                    Text(shopifyTaxable! ? 'Taxable' : 'Non-tax',
-                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                            color: isMismatch ? DS.conflictColor : DS.successColor)),
-                    if (isMismatch) ...[
-                      const SizedBox(width: 4),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                        decoration: DS.badgeDecoration(DS.conflictColor),
-                        child: const Text('MISMATCH', style: DS.badgeStyle),
-                      ),
-                    ] else ...[
-                      const SizedBox(width: 3),
-                      const Icon(Icons.check_circle, size: 11, color: DS.successColor),
-                    ],
-                  ],
-                ],
-              ),
-            ),
-          // Editable chips
-          Row(
-            children: [
-              const Text('Set Tax:', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: DS.subLabel)),
-              const SizedBox(width: 8),
-              ...POSTaxCode.allCodes.map((code) {
-                final isSelected = _posTaxCode == code;
-                return Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: ChoiceChip(
-                    label: Text(POSTaxCode.label(code),
-                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                            color: isSelected ? Colors.white : DS.textLabel)),
-                    selected: isSelected,
-                    selectedColor: DS.posColor,
-                    backgroundColor: DS.neutralBg,
-                    onSelected: (selected) { if (selected) setState(() => _posTaxCode = code); },
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                );
-              }),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  //  CATEGORY SECTION — POS Dept ↔ Shopify Tags
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _buildCategorySection() {
-    final posDepts = _hubEngine?.posDepartments ?? [];
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: _gridColor, width: 0.5)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── POS Department ──
-          Row(
-            children: [
-              const Icon(Icons.point_of_sale, size: 12, color: DS.posColor),
-              const SizedBox(width: 5),
-              const Text('POS Dept', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: DS.posColor)),
-              if (_hubStatus.inPlu && _hubStatus.pluProduct != null) ...[
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(color: DS.posInfoBg, borderRadius: BorderRadius.circular(3)),
-                  child: Text(_hubStatus.pluProduct!.deptName, style: const TextStyle(fontSize: 9, color: DS.posColor)),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 3),
-          SizedBox(
-            height: 34,
-            child: posDepts.isNotEmpty
-                ? DropdownButtonFormField<String>(
-                    value: _posDepartmentName.isNotEmpty && posDepts.contains(_posDepartmentName)
-                        ? _posDepartmentName : null,
-                    items: posDepts.map((dept) =>
-                      DropdownMenuItem(value: dept, child: Text(dept, style: const TextStyle(fontSize: 11)))).toList(),
-                    onChanged: (val) => setState(() => _posDepartmentName = val ?? ''),
-                    decoration: InputDecoration(
-                      hintText: 'Select department',
-                      hintStyle: const TextStyle(fontSize: 10),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-                      isDense: true,
-                    ),
-                    isExpanded: true,
-                    style: const TextStyle(fontSize: 11, color: Colors.black87),
-                  )
-                : TextFormField(
-                    initialValue: _posDepartmentName,
-                    onChanged: (val) => _posDepartmentName = val,
-                    decoration: InputDecoration(
-                      hintText: 'Type department',
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-                      isDense: true,
-                    ),
-                    style: const TextStyle(fontSize: 11),
-                  ),
-          ),
-
-          const SizedBox(height: 8),
-
-          // ── Shopify Tags ──
-          Row(
-            children: [
-              const Icon(Icons.shopping_bag_outlined, size: 12, color: DS.successColor),
-              const SizedBox(width: 5),
-              const Text('Shopify Tags', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: DS.successColor)),
-              if (_shopifyTags.isEmpty) ...[
-                const SizedBox(width: 5),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: DS.errorLightBg,
-                    borderRadius: BorderRadius.circular(3),
-                  ),
-                  child: const Text('REQUIRED', style: TextStyle(fontSize: 7, fontWeight: FontWeight.w800, color: DS.conflictColor)),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 4),
-          Wrap(
-            spacing: 4,
-            runSpacing: 4,
-            children: [
-              ..._shopifyTags.map((tag) => Chip(
-                label: Text(tag, style: const TextStyle(fontSize: 9)),
-                deleteIcon: const Icon(Icons.close, size: 12),
-                onDeleted: () => setState(() => _shopifyTags.remove(tag)),
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                padding: EdgeInsets.zero,
-                backgroundColor: DS.shopifyChipBg,
-                side: const BorderSide(color: DS.successBorder, width: 0.5),
-              )),
-              ActionChip(
-                avatar: const Icon(Icons.add, size: 12, color: DS.successColor),
-                label: const Text('Add', style: TextStyle(fontSize: 9, color: DS.successColor)),
-                onPressed: _addShopifyTag,
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                side: const BorderSide(color: DS.successBorder, width: 0.5),
-                backgroundColor: Colors.white,
-              ),
-            ],
-          ),
-
-          // Confirm mapping — compact
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: InkWell(
-              onTap: () => setState(() => _categoryConfirmed = !_categoryConfirmed),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 20, height: 20,
-                    child: Checkbox(
-                      value: _categoryConfirmed,
-                      onChanged: (val) => setState(() => _categoryConfirmed = val ?? false),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  const Text('Mapping confirmed', style: TextStyle(fontSize: 10, color: DS.textMuted)),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   void _addShopifyTag() {
     showDialog(
@@ -1150,171 +1530,15 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  //  DETAILED STATUS SECTION
-  // ═══════════════════════════════════════════════════════════
 
-  Widget _buildDetailedStatusSection() {
-    final sku = _skuController.text.trim();
-    if (sku.isEmpty) {
-      return Container(
-        padding: const EdgeInsets.all(12),
-        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _gridColor, width: 0.5))),
-        child: Row(
-          children: [
-            Icon(Icons.info_outline, color: Colors.grey[400], size: 16),
-            const SizedBox(width: 8),
-            Text('Add a SKU to check status', style: TextStyle(fontSize: 11, color: Colors.grey[400], fontStyle: FontStyle.italic)),
-          ],
-        ),
-      );
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _gridColor, width: 0.5))),
-      child: Column(
-        children: [
-          // PLU row
-          _systemStatusRow(
-            label: 'POS (Penny Lane)',
-            icon: Icons.point_of_sale,
-            color: DS.posColor,
-            checked: _hubStatus.pluChecked,
-            found: _hubStatus.inPlu,
-            detail: _hubStatus.inPlu && _hubStatus.pluProduct != null
-                ? '${_hubStatus.pluProduct!.desc} · \$${_hubStatus.pluProduct!.price} · Tax: ${_hubStatus.pluProduct!.taxLabel} · Dept: ${_hubStatus.pluProduct!.deptName}'
-                : null,
-          ),
-          const SizedBox(height: 4),
-          // Shopify row
-          _systemStatusRow(
-            label: 'Shopify (apniroots.com)',
-            icon: Icons.shopping_bag_outlined,
-            color: DS.shopifyColor,
-            checked: _hubStatus.shopifyChecked,
-            found: _hubStatus.inShopify,
-            detail: _hubStatus.inShopify && _hubStatus.shopifyProduct != null
-                ? '${_hubStatus.shopifyProduct!['productTitle']} · \$${_hubStatus.shopifyProduct!['price']} · ${(_hubStatus.shopifyProduct!['taxable'] as bool? ?? true) ? 'Taxable' : 'Non-taxable'}'
-                : null,
-          ),
-          Align(
-            alignment: Alignment.centerRight,
-            child: InkWell(
-              onTap: _hydrateProduct,
-              child: Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.refresh, size: 11, color: Colors.grey[500]),
-                    const SizedBox(width: 3),
-                    Text('Recheck All', style: TextStyle(fontSize: 9, color: Colors.grey[500], fontWeight: FontWeight.w600)),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _systemStatusRow({
-    required String label,
-    required IconData icon,
-    required Color color,
-    required bool checked,
-    required bool found,
-    String? detail,
-  }) {
-    if (!checked && _isHydrating) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: DS.spaceMD, vertical: DS.statusRowPadV),
-        decoration: BoxDecoration(color: DS.neutralBg, borderRadius: BorderRadius.circular(DS.radiusM)),
-        child: Row(
-          children: [
-            const SizedBox(width: DS.iconS, height: DS.iconS, child: CircularProgressIndicator(strokeWidth: 2)),
-            const SizedBox(width: DS.spaceM),
-            Text('$label: checking…', style: const TextStyle(fontSize: DS.fontM, color: Colors.grey)),
-          ],
-        ),
-      );
-    }
-
-    final statusColor = found ? DS.successColor : DS.conflictColor;
-    final bg = found ? DS.successBg : DS.errorBg;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: DS.spaceMD, vertical: DS.statusRowPadV),
-      decoration: BoxDecoration(color: checked ? bg : DS.neutralBg, borderRadius: BorderRadius.circular(DS.radiusM)),
-      child: Row(
-        children: [
-          Icon(found ? Icons.check_circle : Icons.cancel, size: DS.iconM, color: checked ? statusColor : Colors.grey),
-          const SizedBox(width: DS.spaceS),
-          Icon(icon, size: DS.iconSM, color: checked ? statusColor : Colors.grey),
-          const SizedBox(width: DS.spaceM),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '$label ${checked ? (found ? "✓" : "✗") : "—"}',
-                  style: DS.statusTitleStyle(checked ? statusColor : Colors.grey),
-                ),
-                if (detail != null)
-                  Text(detail, style: DS.statusDetailStyle(statusColor)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _addToLabelQueue(String reason) async {
-    final sku = _skuController.text.trim();
-    final name = _nameController.text.trim();
-    final price = double.tryParse(_storePriceController.text) ?? 0;
-
-    try {
-      final labelProvider = context.read<LabelQueueProvider>();
-      final item = LabelQueueItem(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        sku: sku,
-        productName: name,
-        reason: reason,
-        correctPrice: price,
-        storeId: widget.store.id,
-        createdAt: DateTime.now(),
-      );
-      await labelProvider.addToQueue(item);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('🏷️ Label request added: $name ($reason)'),
-            backgroundColor: DS.labelColor,
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e'), backgroundColor: AppTheme.errorColor),
-        );
-      }
-    }
-  }
 
   // ═══════════════════════════════════════════════════════════
   //  IMAGES
   // ═══════════════════════════════════════════════════════════
 
   Widget _buildShopifyImageRow() {
-    final shopifyImageUrl = _hubStatus.shopifyImageUrl;
-    final publicUrl = _hubStatus.shopifyPublicUrl;
+    final shopifyImageUrl = _activeShopifyImageUrl;
+    final publicUrl = _activeShopifyPublicUrl;
 
     if (shopifyImageUrl.isEmpty) return const SizedBox.shrink();
 
@@ -1426,7 +1650,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
 
   /// Foldable local image captures — collapsed when Shopify has an image
   Widget _buildFoldableLocalImageCaptures() {
-    final hasShopifyImage = _hubStatus.shopifyImageUrl.isNotEmpty;
+    final hasShopifyImage = _activeShopifyImageUrl.isNotEmpty;
     final hasLocalImages = _frontImageBase64.isNotEmpty || _backImageBase64.isNotEmpty;
     final isExpanded = _localCapturesExpanded || !hasShopifyImage;
 
@@ -1514,7 +1738,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
             SizedBox(
               height: 44,
               child: ElevatedButton.icon(
-                onPressed: _isSaving ? null : _saveProduct,
+                onPressed: (_isSaving || !context.read<AuthProvider>().hasPermission(AppRoles.editProduct)) ? null : _saveProduct,
                 icon: _isSaving
                     ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.save_rounded, size: 18),
@@ -1713,11 +1937,12 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
         sku: sku,
         barcode: sku,
         price: _onlinePriceController.text.trim(), // Online price → Shopify
-        vendor: widget.vendor.name,
+        vendor: widget.activeVendor.name,
         description: name,
         tags: _shopifyTags.join(', '),
-        taxable: POSTaxCode.isTaxable(_posTaxCode),
+        taxable: POSTaxCode.isTaxable(_posTaxCode),                       // follows POS tax
         imageBase64: _frontImageBase64.isNotEmpty ? _frontImageBase64 : null,
+        backImageBase64: _backImageBase64.isNotEmpty ? _backImageBase64 : null,
       );
 
       if (mounted) {
@@ -1731,6 +1956,16 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
               duration: const Duration(seconds: 3),
             ),
           );
+
+          // Save Shopify image URL back to Firebase so product lists show the image
+          final imageUrl = (result['product']?['image'] as String? ?? '');
+          if (imageUrl.isNotEmpty && !widget.isLookupMode && widget.activeProduct.id.isNotEmpty) {
+            FirebaseService().updateProductFields(
+              widget.activeStore.id, widget.activeVendor.id, widget.activeProduct.id,
+              {'shopifyImageUrl': imageUrl}, // persist so vendor list can show thumbnail
+            );
+          }
+
           _hydrateProduct(); // Refresh status
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -1749,6 +1984,44 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   }
 
   Future<void> _exportToPOS() async {
+    if (!widget.isMultiStoreMode) {
+      _doExportToPOS(widget.activeStore);
+      return;
+    }
+
+    // Lookup mode: all stores. Multi-store: only stores that carry this product.
+    final List<Store> relevantStores;
+    if (widget.isLookupMode) {
+      relevantStores = widget.allStores ?? [];
+    } else {
+      final productStoreIds = widget.crossStoreProduct?.storeRefs.keys.toSet() ?? {};
+      relevantStores = widget.allStores!.where((s) => productStoreIds.contains(s.id)).toList();
+    }
+
+    if (relevantStores.length == 1) {
+      _doExportToPOS(relevantStores.first);
+      return;
+    }
+
+    // Multiple stores — let user pick
+    final chosen = await showDialog<Store>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Export to which store POS?'),
+        children: relevantStores.map((s) => SimpleDialogOption(
+          onPressed: () => Navigator.pop(ctx, s),
+          child: Row(children: [
+            Icon(Icons.point_of_sale, size: 18, color: DS.posColor),
+            const SizedBox(width: 8),
+            Text(s.name),
+          ]),
+        )).toList(),
+      ),
+    );
+    if (chosen != null) _doExportToPOS(chosen);
+  }
+
+  Future<void> _doExportToPOS(Store targetStore) async {
     final sku = _skuController.text.trim();
     final name = _nameController.text.trim();
     if (sku.isEmpty || name.isEmpty) return;
@@ -1764,10 +2037,12 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
           'cost': _pcCostController.text.trim(),
           'department': _hubEngine?.deptCodeForName(_posDepartmentName) ?? '',
           'departmentName': _posDepartmentName,
-          'vendor': widget.vendor.name,
+          'vendor': widget.activeVendor.name,
           'taxCode': _posTaxCode,
           'reorderLevel': _minStockController.text.trim(),
           'reorderQty': _defaultOrderQtyController.text.trim(),
+          'storeId': targetStore.id,
+          'storeName': targetStore.name,
         },
       ];
 
@@ -1776,7 +2051,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
       if (mounted) {
         setState(() => _isExportingPOS = false);
         if (csv != null) {
-          _showPosExportDialog(csv);
+          _showPosExportDialog(csv, storeName: targetStore.name);
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: const Text('POS export failed'), backgroundColor: AppTheme.errorColor),
@@ -1793,10 +2068,10 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     }
   }
 
-  void _showPosExportDialog(String csv) {
+  void _showPosExportDialog(String csv, {String? storeName}) {
     showDialog(
       context: context,
-      builder: (ctx) => _PosExportDialog(newCodesContent: csv),
+      builder: (ctx) => _PosExportDialog(newCodesContent: csv, storeName: storeName),
     );
   }
 
@@ -1823,42 +2098,41 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
       final bytes = await pickImageWeb(useCamera: useCamera);
       if (bytes == null) return;
 
-      // Compress immediately — resize to max 1024px, JPEG quality 75%
-      String b64 = await compressImageToBase64(bytes, maxDimension: 1024, quality: 0.75);
+      // Compress to 756×1008 JPEG (portrait 3:4 — matches existing Shopify product images)
+      String b64 = await compressImageToBase64(bytes);
       debugPrint('📸 Compressed image: ${(b64.length * 3 / 4 / 1024).round()} KB');
 
       setState(() {
         if (isFront) _frontImageBase64 = b64; else _backImageBase64 = b64;
       });
 
-      if (_removeBgApiKey.isNotEmpty) {
-        setState(() {
-          if (isFront) _isRemovingBgFront = true; else _isRemovingBgBack = true;
-        });
+      // Auto-remove background via Replicate rembg on every capture
+      setState(() {
+        if (isFront) _isRemovingBgFront = true; else _isRemovingBgBack = true;
+      });
 
-        final processedB64 = await _removeBackground(bytes);
+      final processedB64 = await SyncService().removeBackground(b64); // use compressed image — raw bytes are too large for Replicate
 
-        // Compress the bg-removed PNG → JPEG to keep it small
-        String? compressedResult;
-        if (processedB64 != null) {
-          compressedResult = await compressBase64Image(processedB64, maxDimension: 1024, quality: 0.80);
-          debugPrint('📸 BG-removed compressed: ${(compressedResult.length * 3 / 4 / 1024).round()} KB');
-        }
-
-        setState(() {
-          if (isFront) {
-            _isRemovingBgFront = false;
-            if (compressedResult != null) _frontImageBase64 = compressedResult;
-          } else {
-            _isRemovingBgBack = false;
-            if (compressedResult != null) _backImageBase64 = compressedResult;
-          }
-        });
+      // Resize the bg-removed PNG — keep as PNG to preserve transparency (JPEG would kill it)
+      String? compressedResult;
+      if (processedB64 != null) {
+        compressedResult = await resizeBase64Png(processedB64); // 756×1008 transparent PNG — matches Shopify product images
+        debugPrint('📸 BG-removed PNG: ${(compressedResult.length * 3 / 4 / 1024).round()} KB');
       }
+
+      setState(() {
+        if (isFront) {
+          _isRemovingBgFront = false;
+          if (compressedResult != null) _frontImageBase64 = compressedResult;
+        } else {
+          _isRemovingBgBack = false;
+          if (compressedResult != null) _backImageBase64 = compressedResult;
+        }
+      });
 
       // Image is kept locally in memory (base64).
       // It will be sent directly to Shopify when you tap "Create/Update on Shopify".
-      if (isFront && mounted) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('📷 Image captured — tap "Create/Update on Shopify" to upload'),
@@ -1877,24 +2151,6 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     }
   }
 
-  Future<String?> _removeBackground(Uint8List imageBytes) async {
-    try {
-      final request = http.MultipartRequest('POST', Uri.parse('https://api.remove.bg/v1.0/removebg'));
-      request.headers['X-Api-Key'] = _removeBgApiKey;
-      request.fields['size'] = 'auto';
-      request.files.add(http.MultipartFile.fromBytes('image_file', imageBytes, filename: 'product.jpg'));
-
-      final streamedResponse = await request.send();
-      if (streamedResponse.statusCode == 200) {
-        final responseBytes = await streamedResponse.stream.toBytes();
-        return base64Encode(responseBytes);
-      }
-      return null;
-    } catch (e) {
-      debugPrint('remove.bg exception: $e');
-      return null;
-    }
-  }
 
   void _scanBarcode() async {
     final scannedCode = await Navigator.of(context).push<String>(
@@ -1918,9 +2174,13 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     // They will be sent directly to Shopify when syncing.
 
     final updatedProduct = Product(
-      id: widget.product.id,
-      vendorId: widget.product.vendorId,
+      id: widget.activeProduct.id,
+      vendorId: widget.activeProduct.vendorId,
       name: _nameController.text.trim(),
+      // orderListProductName is locked once set — never updated by SKU scans
+      orderListProductName: widget.activeProduct.orderListProductName.isNotEmpty
+          ? widget.activeProduct.orderListProductName
+          : widget.activeProduct.name,
       sku: sku,
       pcsPerCase: int.tryParse(_pcsPerCaseController.text) ?? 1,
       pcsPerLine: int.tryParse(_pcsPerLineController.text) ?? 1,
@@ -1931,25 +2191,25 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
       pcCost: double.tryParse(_pcCostController.text) ?? 0,
       caseCost: double.tryParse(_caseCostController.text) ?? 0,
       posTaxCode: _posTaxCode,
-      shopifyTaxable: POSTaxCode.isTaxable(_posTaxCode),
+      shopifyTaxable: POSTaxCode.isTaxable(_posTaxCode), // follows POS tax
       posDepartment: _hubEngine?.deptCodeForName(_posDepartmentName) ?? '',
       posDepartmentName: _posDepartmentName,
       shopifyTags: _shopifyTags,
-      shopifyCollection: widget.product.shopifyCollection,
+      shopifyCollection: widget.activeProduct.shopifyCollection,
       categoryConfirmed: _categoryConfirmed,
-      shopifyImageUrl: widget.product.shopifyImageUrl,
+      shopifyImageUrl: widget.activeProduct.shopifyImageUrl,
       frontImageBase64: _frontImageBase64,
       backImageBase64: _backImageBase64,
       reorderRule: ReorderRule(
         minStockPcs: int.tryParse(_minStockController.text) ?? 0,
         defaultOrderQty: int.tryParse(_defaultOrderQtyController.text) ?? 0,
       ),
-      sortOrder: widget.product.sortOrder,
-      createdAt: widget.product.createdAt,
+      sortOrder: widget.activeProduct.sortOrder,
+      createdAt: widget.activeProduct.createdAt,
     );
 
     try {
-      await productProvider.updateProduct(widget.store.id, widget.vendor.id, updatedProduct);
+      await productProvider.updateProduct(widget.activeStore.id, widget.activeVendor.id, updatedProduct);
 
       if (context.mounted) {
         setState(() => _isSaving = false);
@@ -2066,7 +2326,8 @@ class _BarcodeScannerScreenState extends State<_BarcodeScannerScreen> {
 
 class _PosExportDialog extends StatefulWidget {
   final String newCodesContent;
-  const _PosExportDialog({required this.newCodesContent});
+  final String? storeName;
+  const _PosExportDialog({required this.newCodesContent, this.storeName});
 
   @override
   State<_PosExportDialog> createState() => _PosExportDialogState();
@@ -2081,7 +2342,7 @@ class _PosExportDialogState extends State<_PosExportDialog> {
   Future<void> _uploadToCloud() async {
     setState(() => _isUploading = true);
     try {
-      final url = await SyncService().uploadNewCodesToCloud(widget.newCodesContent)
+      final url = await SyncService().uploadNewCodesToCloud(widget.newCodesContent, storeName: widget.storeName)
           .timeout(const Duration(seconds: 30), onTimeout: () {
         debugPrint('_uploadToCloud: timed out after 30s');
         return null;
@@ -2090,7 +2351,9 @@ class _PosExportDialogState extends State<_PosExportDialog> {
         setState(() { _isUploading = false; _uploaded = url != null; _downloadUrl = url; });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(url != null ? '✓ updateproduct.PLU uploaded to cloud' : 'Upload failed — check connection'),
+            content: Text(url != null
+                ? '✓ updateproduct.PLU uploaded${widget.storeName != null ? ' → ${widget.storeName}' : ''}'
+                : 'Upload failed — check connection'),
             backgroundColor: url != null ? DS.successColor : Colors.red,
           ),
         );
@@ -2114,10 +2377,15 @@ class _PosExportDialogState extends State<_PosExportDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Row(children: [
-        Icon(Icons.point_of_sale, color: DS.successColor),
-        SizedBox(width: 8),
-        Expanded(child: Text('Penny Lane POS Import', style: TextStyle(fontSize: 15))),
+      title: Row(children: [
+        const Icon(Icons.point_of_sale, color: DS.successColor),
+        const SizedBox(width: 8),
+        Expanded(child: Text(
+          widget.storeName != null
+            ? 'POS Import → ${widget.storeName}'
+            : 'Penny Lane POS Import',
+          style: const TextStyle(fontSize: 15),
+        )),
       ]),
       content: SizedBox(
         width: double.maxFinite,
@@ -2163,8 +2431,11 @@ class _PosExportDialogState extends State<_PosExportDialog> {
                     Text('Ready for POS pickup!', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: DS.successColor)),
                   ]),
                   const SizedBox(height: 8),
-                  const Text('File uploaded to Firebase Storage. Windows POS will auto-download on next startup.',
-                    style: TextStyle(fontSize: 11, color: DS.successDeep)),
+                  Text(
+                    widget.storeName != null
+                      ? 'Uploaded to pos-imports/${widget.storeName}/. POS at ${widget.storeName} will auto-download on next startup.'
+                      : 'File uploaded to Firebase Storage. Windows POS will auto-download on next startup.',
+                    style: const TextStyle(fontSize: 11, color: DS.successDeep)),
                 ]),
               ),
               const SizedBox(height: 12),
@@ -2542,19 +2813,6 @@ class _ShopifyTagPickerDialogState extends State<_ShopifyTagPickerDialog> {
       ],
     );
   }
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  COMPARISON ROW DATA HELPER
-// ═══════════════════════════════════════════════════════════════
-
-class _CompRow {
-  final String label;
-  final String posValue;
-  final String shopifyValue;
-  /// When true, skip naive string comparison — values are semantically equal.
-  final bool semanticMatch;
-  _CompRow(this.label, this.posValue, this.shopifyValue, {this.semanticMatch = false});
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -12,11 +12,12 @@ import 'package:newstore_ordering_app/screens/order_creation_screen.dart';
 import 'package:newstore_ordering_app/screens/product_hub_screen.dart';
 import 'package:newstore_ordering_app/screens/manage_stores_screen.dart';
 import 'package:newstore_ordering_app/screens/import_screen.dart';
-import 'package:newstore_ordering_app/screens/scan_lookup_screen.dart';
-import 'package:newstore_ordering_app/screens/sku_collect_screen.dart';
 import 'package:newstore_ordering_app/screens/product_sync_screen.dart';
+import 'package:newstore_ordering_app/screens/shopify_missing_screen.dart';
+import 'package:newstore_ordering_app/screens/pending_approval_screen.dart';
+import 'package:newstore_ordering_app/screens/platform_markup_screen.dart';
 import 'package:newstore_ordering_app/providers/plu_provider.dart';
-import 'package:newstore_ordering_app/providers/label_queue_provider.dart';
+import 'package:newstore_ordering_app/services/firebase_service.dart';
 import 'package:newstore_ordering_app/services/sync_service.dart';
 import 'package:newstore_ordering_app/utils/theme.dart';
 
@@ -28,6 +29,8 @@ void main() async {
     );
     // Load Shopify config from Firestore on startup
     await SyncService().loadConfig();
+    // Seed PLU URLs for known stores (one-time, skips if already set)
+    await FirebaseService().seedStorePluUrls();
   } catch (e) {
     print('Firebase initialization: $e');
   }
@@ -47,7 +50,6 @@ class MyApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => ProductProvider()),
         ChangeNotifierProvider(create: (_) => OrderProvider()),
         ChangeNotifierProvider(create: (_) => PLUProvider()),
-        ChangeNotifierProvider(create: (_) => LabelQueueProvider()),
       ],
       child: MaterialApp(
         title: 'NewStore Ordering',
@@ -55,11 +57,9 @@ class MyApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         home: Consumer<AuthProvider>(
           builder: (context, authProvider, _) {
-            if (authProvider.isAuthenticated) {
-              return const HomeScreen();
-            } else {
-              return const LoginScreen();
-            }
+            if (!authProvider.isAuthenticated) return const LoginScreen();
+            if (authProvider.isPending)        return const PendingApprovalScreen();
+            return const HomeScreen();
           },
         ),
         routes: {
@@ -67,8 +67,10 @@ class MyApp extends StatelessWidget {
           '/home': (context) => const HomeScreen(),
           '/manage-stores': (context) => const ManageStoresScreen(),
           '/import': (context) => const ImportScreen(),
-          '/scan-lookup': (context) => const ScanLookupScreen(),
-          '/sku-collect': (context) => const SkuCollectScreen(),
+          '/uber-markup': (context) => const PlatformMarkupScreen(
+                title: 'Uber Markup', platformDocId: 'ubereats_margins'),
+          '/instacart-markup': (context) => const PlatformMarkupScreen(
+                title: 'Instacart Markup', platformDocId: 'instacart_margins'),
           '/product-sync': (context) => const ProductSyncScreen(),
           '/store': (context) {
             final store = ModalRoute.of(context)?.settings.arguments as Store;
@@ -102,6 +104,30 @@ class MyApp extends StatelessWidget {
                 vendor: args['vendor'] as Vendor,
                 currentOrder: args['currentOrder'] as Order?,
                 mode: (args['mode'] as String?) ?? 'stock',
+              ),
+            );
+          } else if (settings.name == '/product-multi') {
+            final args = settings.arguments as Map<String, dynamic>;
+            return MaterialPageRoute(
+              builder: (context) => ProductHubScreen(
+                crossStoreProduct: args['crossStoreProduct'] as CrossStoreProduct,
+                allStores: args['allStores'] as List<Store>,
+              ),
+            );
+          } else if (settings.name == '/product-lookup') {
+            final args = settings.arguments as Map<String, dynamic>;
+            return MaterialPageRoute(
+              builder: (context) => ProductHubScreen(
+                lookupSku: args['sku'] as String,
+                allStores: args['allStores'] as List<Store>,
+                lookupOrderListProductName: args['orderListProductName'] as String?,
+              ),
+            );
+          } else if (settings.name == '/shopify-missing') {
+            final args = settings.arguments as Map<String, dynamic>;
+            return MaterialPageRoute(
+              builder: (context) => ShopifyMissingScreen(
+                store: args['store'] as Store,
               ),
             );
           }

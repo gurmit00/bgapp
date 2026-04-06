@@ -407,18 +407,53 @@ class _ImportScreenState extends State<ImportScreen> {
     });
   }
 
+  // Expected fixed column order (0-indexed):
+  // 0  Vendor
+  // 1  Product Name
+  // 2  SKU
+  // 3  Pcs Per Case
+  // 4  Pcs Per Line
+  // 5  Pc Price
+  // 6  Case Price
+  // 7  Pc Cost
+  // 8  Case Cost
+  // 9  Min Stock
+  // 10 Default Order
+  // 11 On Hand (Pcs)   — ignored on import
+  // 12 Order Qty (Cases) — ignored on import
+  // 13 Vendor Phone
+
+  /// Splits a CSV/TSV line respecting double-quoted fields.
+  List<String> _splitLine(String line) {
+    if (line.contains('\t')) return line.split('\t').map((c) => c.trim()).toList();
+    final result = <String>[];
+    final buf = StringBuffer();
+    bool inQuotes = false;
+    for (var i = 0; i < line.length; i++) {
+      final ch = line[i];
+      if (ch == '"') {
+        inQuotes = !inQuotes;
+      } else if (ch == ',' && !inQuotes) {
+        result.add(buf.toString().trim());
+        buf.clear();
+      } else {
+        buf.write(ch);
+      }
+    }
+    result.add(buf.toString().trim());
+    return result;
+  }
+
+  String _col(List<String> cols, int i) =>
+      i < cols.length ? cols[i].trim() : '';
+
   void _previewImport() async {
     if (_selectedStore == null) {
-      setState(() {
-        _importStatus = 'Error: Please select a store first';
-      });
+      setState(() { _importStatus = 'Error: Please select a store first'; });
       return;
     }
-
     if (_dataController.text.isEmpty) {
-      setState(() {
-        _importStatus = 'Error: Please paste data to preview';
-      });
+      setState(() { _importStatus = 'Error: Please paste data to preview'; });
       return;
     }
 
@@ -430,63 +465,35 @@ class _ImportScreenState extends State<ImportScreen> {
         final line = lines[i].trim();
         if (line.isEmpty) continue;
 
-        // Try tab-separated first, then comma
-        List<String> columns;
-        if (line.contains('\t')) {
-          columns = line.split('\t');
-        } else {
-          columns = line.split(',');
-        }
+        final cols = _splitLine(line);
 
-        // Skip header row only if the first column is exactly a known header label
-        // Also detect if the data came from an export (has 'Store Name' as first col)
-        if (i == 0) {
-          final firstCol = columns[0].trim().toLowerCase();
-          const headerLabels = [
-            'vendor', 'vendor name', 'vendor_name', 'vendorname',
-            'product', 'product name', 'product_name', 'productname',
-            'store name', 'store_name', 'storename', 'store',
-          ];
-          if (headerLabels.contains(firstCol)) {
-            continue;
-          }
-        }
+        // Skip header row — first column is "Vendor" (case-insensitive)
+        if (i == 0 && _col(cols, 0).toLowerCase() == 'vendor') continue;
 
-        // Detect if data has a leading Store Name column (from export)
-        // Heuristic: if there are 13+ columns, the first column might be a store name.
-        // We check if column 0 looks like a store name by seeing if column 5 parses as int
-        // (Pcs Per Case position differs: col 3 for normal, col 4 for store-prefixed)
-        int offset = 0;
-        if (columns.length >= 13) {
-          // If col 3 does NOT parse as int but col 4 does, there's a store name prefix
-          final col3IsInt = int.tryParse(columns.length > 3 ? columns[3].trim() : '') != null;
-          final col4IsInt = int.tryParse(columns.length > 4 ? columns[4].trim() : '') != null;
-          if (!col3IsInt && col4IsInt) {
-            offset = 1; // Skip the Store Name column
-          }
-        }
+        final vendorName = _col(cols, 0);
+        final productName = _col(cols, 1);
+        if (vendorName.isEmpty || productName.isEmpty) continue;
 
-        if (columns.length >= (2 + offset)) {
-          parsedData.add({
-            'vendorName': columns[0 + offset].trim(),
-            'productName': columns[1 + offset].trim(),
-            'sku': columns.length > (2 + offset) ? columns[2 + offset].trim() : '',
-            'pcsPerCase': columns.length > (3 + offset) ? int.tryParse(columns[3 + offset].trim()) ?? 1 : 1,
-            'pcsPerLine': columns.length > (4 + offset) ? int.tryParse(columns[4 + offset].trim()) ?? 1 : 1,
-            'pcPrice': columns.length > (5 + offset) ? double.tryParse(columns[5 + offset].trim()) ?? 0.0 : 0.0,
-            'casePrice': columns.length > (6 + offset) ? double.tryParse(columns[6 + offset].trim()) ?? 0.0 : 0.0,
-            'pcCost': columns.length > (7 + offset) ? double.tryParse(columns[7 + offset].trim()) ?? 0.0 : 0.0,
-            'caseCost': columns.length > (8 + offset) ? double.tryParse(columns[8 + offset].trim()) ?? 0.0 : 0.0,
-            'minStock': columns.length > (9 + offset) ? int.tryParse(columns[9 + offset].trim()) ?? 0 : 0,
-            'defaultOrder': columns.length > (10 + offset) ? int.tryParse(columns[10 + offset].trim()) ?? 0 : 0,
-            'vendorPhone': columns.length > (11 + offset) ? columns[11 + offset].trim() : '',
-            'sortOrder': parsedData.length,
-            'isDuplicate': false,
-          });
-        }
+        parsedData.add({
+          'vendorName':   vendorName,
+          'productName':  productName,
+          'sku':          _col(cols, 2),
+          'pcsPerCase':   int.tryParse(_col(cols, 3)) ?? 1,
+          'pcsPerLine':   int.tryParse(_col(cols, 4)) ?? 1,
+          'pcPrice':      double.tryParse(_col(cols, 5)) ?? 0.0,
+          'casePrice':    double.tryParse(_col(cols, 6)) ?? 0.0,
+          'pcCost':       double.tryParse(_col(cols, 7)) ?? 0.0,
+          'caseCost':     double.tryParse(_col(cols, 8)) ?? 0.0,
+          'minStock':     int.tryParse(_col(cols, 9)) ?? 0,
+          'defaultOrder': int.tryParse(_col(cols, 10)) ?? 0,
+          // cols 11 (On Hand) and 12 (Order Qty) are skipped — order data only
+          'vendorPhone':  _col(cols, 13),
+          'sortOrder':    parsedData.length,
+          'isDuplicate':  false,
+        });
       }
 
-      // Check for duplicates against existing products in the selected store
+      // ── Duplicate check ──
       int duplicateCount = 0;
       if (parsedData.isNotEmpty) {
         final firebaseService = FirebaseService();
@@ -494,7 +501,6 @@ class _ImportScreenState extends State<ImportScreen> {
         await vendorProvider.loadVendors(_selectedStore!.id);
         final existingVendors = vendorProvider.vendors;
 
-        // Group by vendor name for efficient lookup
         final vendorNames = parsedData.map((r) => (r['vendorName'] as String).toLowerCase()).toSet();
 
         for (final vName in vendorNames) {
@@ -503,17 +509,12 @@ class _ImportScreenState extends State<ImportScreen> {
               .firstOrNull;
           if (existingVendor == null) continue;
 
-          // Load existing products for this vendor in this store
           final existingProducts = await firebaseService.getProducts(_selectedStore!.id, existingVendor.id);
 
           for (var row in parsedData) {
             if ((row['vendorName'] as String).toLowerCase() != vName) continue;
-            final productName = (row['productName'] as String).trim();
-
-            final isDup = existingProducts.any((existing) {
-              return existing.name.toLowerCase() == productName.toLowerCase();
-            });
-
+            final isDup = existingProducts.any((p) =>
+                p.name.toLowerCase() == (row['productName'] as String).toLowerCase());
             if (isDup) {
               row['isDuplicate'] = true;
               duplicateCount++;
@@ -533,9 +534,7 @@ class _ImportScreenState extends State<ImportScreen> {
             : 'Preview ready: ${parsedData.length} products from ${_getUniqueVendors()} vendors into ${_selectedStore!.name}$dupMsg';
       });
     } catch (e) {
-      setState(() {
-        _importStatus = 'Error parsing data: $e';
-      });
+      setState(() { _importStatus = 'Error parsing data: $e'; });
     }
   }
 
@@ -561,12 +560,14 @@ class _ImportScreenState extends State<ImportScreen> {
       // Load current vendors for this store
       await vendorProvider.loadVendors(storeId);
 
-      // Group products by vendor
+      // Group products by vendor — use lowercase trimmed key to prevent duplicates
+      // from whitespace or case differences; preserve original casing in the row data.
       final Map<String, List<Map<String, dynamic>>> vendorProducts = {};
       for (var row in _previewData) {
-        final vendorName = row['vendorName'] as String;
-        vendorProducts.putIfAbsent(vendorName, () => []);
-        vendorProducts[vendorName]!.add(row);
+        final key = (row['vendorName'] as String).trim().toLowerCase();
+        row['vendorName'] = (row['vendorName'] as String).trim(); // normalise in-place
+        vendorProducts.putIfAbsent(key, () => []);
+        vendorProducts[key]!.add(row);
       }
 
       int vendorsCreated = 0;
@@ -576,8 +577,9 @@ class _ImportScreenState extends State<ImportScreen> {
 
       // Process each vendor
       for (var entry in vendorProducts.entries) {
-        final vendorName = entry.key;
+        // key is lowercase — use original casing from the first row
         final products = entry.value;
+        final vendorName = products.first['vendorName'] as String;
 
         // Check if vendor already exists in this store
         var existingVendor = vendorProvider.vendors

@@ -20,7 +20,7 @@ Future<Uint8List?> pickImageWeb({bool useCamera = false}) async {
 
   input.click();
 
-  // Listen for file selection
+  // Listen for file selection — onChange fires when user picks a file or cancels
   input.onChange.listen((event) {
     final files = input.files;
     if (files == null || files.isEmpty) {
@@ -42,15 +42,9 @@ Future<Uint8List?> pickImageWeb({bool useCamera = false}) async {
     reader.onError.listen((_) => completer.complete(null));
   });
 
-  // Handle cancel (focus returns without file selection)
-  // Use a delayed check since there's no direct cancel event
-  html.window.onFocus.first.then((_) {
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (!completer.isCompleted) {
-        completer.complete(null);
-      }
-    });
-  });
+  // Note: no window.onFocus cancel detection — it fires too early on first open
+  // and cancels the picker before the user has a chance to take the photo.
+  // The completer resolves naturally when the user picks or dismisses.
 
   return completer.future;
 }

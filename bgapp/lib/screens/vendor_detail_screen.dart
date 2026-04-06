@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:newstore_ordering_app/models/models.dart';
 import 'package:newstore_ordering_app/providers/app_providers.dart';
 import 'package:newstore_ordering_app/utils/theme.dart';
+import 'package:newstore_ordering_app/utils/app_roles.dart';
 
 class VendorDetailScreen extends StatefulWidget {
   final Vendor vendor;
@@ -23,6 +25,109 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
     });
   }
 
+  // ── SKU coverage helpers ──────────────────────────────────
+  int _skuCount(List<Product> products) => products.where((p) => p.sku.isNotEmpty).length;
+
+  // ── Scan-to-link: open scanner targeting a specific product ─
+  void _scanForProduct(Product product) async {
+    final scanned = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => _BarcodeScannerPage(productName: product.name),
+      ),
+    );
+    if (scanned != null && scanned.isNotEmpty && mounted) {
+      await _linkSkuToProduct(product, scanned);
+    }
+  }
+
+  // ── Link scanned SKU to product in Firestore ──────────────
+  Future<void> _linkSkuToProduct(Product product, String sku) async {
+    final updated = Product(
+      id: product.id,
+      vendorId: product.vendorId,
+      name: product.name,
+      sku: sku,
+      pcsPerCase: product.pcsPerCase,
+      pcsPerLine: product.pcsPerLine,
+      storePrice: product.storePrice,
+      onlinePrice: product.onlinePrice,
+      storeCasePrice: product.storeCasePrice,
+      onlineCasePrice: product.onlineCasePrice,
+      pcCost: product.pcCost,
+      caseCost: product.caseCost,
+      posTaxCode: product.posTaxCode,
+      shopifyTaxable: product.shopifyTaxable,
+      posDepartment: product.posDepartment,
+      posDepartmentName: product.posDepartmentName,
+      shopifyTags: product.shopifyTags,
+      shopifyCollection: product.shopifyCollection,
+      categoryConfirmed: product.categoryConfirmed,
+      shopifyImageUrl: product.shopifyImageUrl,
+      reorderRule: product.reorderRule,
+      sortOrder: product.sortOrder,
+      createdAt: product.createdAt,
+    );
+
+    await context.read<ProductProvider>().updateProduct(
+      widget.store.id, widget.vendor.id, updated,
+    );
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('SKU $sku linked to "${product.name}"'),
+          backgroundColor: AppTheme.accentColor,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  // ── Manual SKU entry dialog ───────────────────────────────
+  void _manualSkuEntry(Product product) {
+    final controller = TextEditingController(text: product.sku);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(product.sku.isEmpty ? 'Enter SKU' : 'Edit SKU'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(product.name, style: TextStyle(fontSize: 13, color: AppTheme.textSecondary)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'SKU / Barcode',
+                prefixIcon: Icon(Icons.qr_code, size: 20),
+              ),
+              onSubmitted: (v) {
+                if (v.trim().isNotEmpty) {
+                  Navigator.pop(ctx);
+                  _linkSkuToProduct(product, v.trim());
+                }
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              final sku = controller.text.trim();
+              if (sku.isNotEmpty) {
+                Navigator.pop(ctx);
+                _linkSkuToProduct(product, sku);
+              }
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -31,7 +136,7 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(widget.vendor.name),
-            const Text('vendor_detail_screen.dart', style: TextStyle(fontSize: 10, color: Colors.white38)),
+            Text(widget.store.name, style: const TextStyle(fontSize: 11, color: Colors.white60)),
           ],
         ),
         actions: [
@@ -49,78 +154,83 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
       ),
       body: Consumer<ProductProvider>(
         builder: (context, productProvider, _) {
+          final products = productProvider.products;
+          final total = products.length;
+          final linked = _skuCount(products);
+          final pct = total > 0 ? (linked / total) : 0.0;
+
           return Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
             child: Column(
               children: [
-                // Vendor Info Strip
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 44,
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: AppTheme.accentColor.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Icon(Icons.business_rounded, color: AppTheme.accentColor, size: 22),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                // ── SKU Coverage Card ──
+                if (total > 0)
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
                             children: [
-                              Text(widget.vendor.name, style: Theme.of(context).textTheme.titleMedium),
-                              if (widget.vendor.whatsappPhoneNumber.isNotEmpty)
-                                Row(
-                                  children: [
-                                    Icon(Icons.phone, size: 13, color: AppTheme.textTertiary),
-                                    const SizedBox(width: 4),
-                                    Text(widget.vendor.whatsappPhoneNumber, style: Theme.of(context).textTheme.bodySmall),
-                                  ],
-                                )
-                              else
-                                GestureDetector(
-                                  onTap: () => _showEditVendorDialog(context),
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.phone_missed, size: 13, color: AppTheme.warningColor),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        'No WhatsApp phone – tap to add',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: AppTheme.warningColor,
-                                          fontStyle: FontStyle.italic,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
+                              Icon(
+                                linked == total ? Icons.check_circle : Icons.qr_code_scanner,
+                                size: 20,
+                                color: linked == total ? AppTheme.accentColor : AppTheme.warningColor,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'SKU Coverage',
+                                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                              ),
+                              const Spacer(),
+                              Text(
+                                '$linked / $total',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                  color: linked == total ? AppTheme.accentColor : AppTheme.warningColor,
                                 ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                '(${(pct * 100).toInt()}%)',
+                                style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                              ),
                             ],
                           ),
-                        ),
-                        if (widget.store != null)
-                          Chip(
-                            label: Text(widget.store.name, style: const TextStyle(fontSize: 11)),
-                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          const SizedBox(height: 8),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: LinearProgressIndicator(
+                              value: pct,
+                              minHeight: 6,
+                              backgroundColor: AppTheme.borderColor,
+                              valueColor: AlwaysStoppedAnimation(
+                                linked == total ? AppTheme.accentColor : AppTheme.warningColor,
+                              ),
+                            ),
                           ),
-                      ],
+                          if (linked < total) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              '${total - linked} products need SKU scanning',
+                              style: TextStyle(fontSize: 11, color: AppTheme.textTertiary),
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
 
-                // Products Header
+                // ── Products Header ──
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
                   child: Row(
                     children: [
                       Text(
-                        'Products (${productProvider.products.length})',
+                        'Products ($total)',
                         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.textPrimary),
                       ),
                       const Spacer(),
@@ -140,9 +250,9 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
                   ),
                 ),
 
-                // Spreadsheet-style Products Table
+                // ── Products List ──
                 Expanded(
-                  child: productProvider.products.isEmpty
+                  child: products.isEmpty
                       ? Center(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -162,67 +272,163 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
       ),
       // Create Order FAB
       floatingActionButton: FloatingActionButton.extended(
-              onPressed: () {
-                Navigator.of(context).pushNamed(
-                  '/order-creation',
-                  arguments: {
-                    'store': widget.store,
-                    'vendor': widget.vendor,
-                  },
-                );
-              },
-              backgroundColor: AppTheme.accentColor,
-              icon: const Icon(Icons.receipt_long),
-              label: const Text('Create Order'),
-            ),
+        onPressed: () {
+          Navigator.of(context).pushNamed(
+            '/order-creation',
+            arguments: {
+              'store': widget.store,
+              'vendor': widget.vendor,
+            },
+          );
+        },
+        backgroundColor: AppTheme.accentColor,
+        icon: const Icon(Icons.receipt_long),
+        label: const Text('Create Order'),
+      ),
     );
   }
 
   Widget _buildProductList(BuildContext context, ProductProvider productProvider) {
+    // Sort: products without SKU first (need attention), then by name
+    final products = List<Product>.from(productProvider.products);
+    products.sort((a, b) {
+      final aHas = a.sku.isNotEmpty ? 1 : 0;
+      final bHas = b.sku.isNotEmpty ? 1 : 0;
+      if (aHas != bHas) return aHas - bHas; // no-SKU first
+      return a.sortOrder.compareTo(b.sortOrder);
+    });
+
     return ListView.builder(
-      padding: const EdgeInsets.only(bottom: 80), // extra space so FAB doesn't cover last item
-      itemCount: productProvider.products.length,
+      padding: const EdgeInsets.only(bottom: 80),
+      itemCount: products.length,
       itemBuilder: (context, index) {
-        final p = productProvider.products[index];
+        final p = products[index];
+        final hasSku = p.sku.isNotEmpty;
+
         return InkWell(
-          onTap: () => Navigator.of(context).pushNamed('/product', arguments: {
-            'product': p, 'store': widget.store, 'vendor': widget.vendor,
-          }),
+          onTap: hasSku
+              ? () {
+                  // Go to Product Hub for products with SKU
+                  final stores = context.read<StoreProvider>().stores;
+                  Navigator.of(context).pushNamed('/product-lookup', arguments: {
+                    'sku': p.sku,
+                    'allStores': stores,
+                  });
+                }
+              : () => _scanForProduct(p),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
-              color: index.isEven ? Colors.white : const Color(0xFFF8FAFC),
+              color: hasSku
+                  ? (index.isEven ? Colors.white : const Color(0xFFF8FAFC))
+                  : const Color(0xFFFFF7ED), // warm orange tint for missing SKU
               border: const Border(bottom: BorderSide(color: AppTheme.dividerColor, width: 0.5)),
             ),
             child: Row(
               children: [
                 // Row number
                 SizedBox(
-                  width: 28,
+                  width: 26,
                   child: Text(
                     '${index + 1}',
-                    style: const TextStyle(fontSize: 12, color: AppTheme.textTertiary),
+                    style: const TextStyle(fontSize: 11, color: AppTheme.textTertiary),
                     textAlign: TextAlign.center,
                   ),
                 ),
-                const SizedBox(width: 8),
-                // Product name
+                const SizedBox(width: 6),
+
+                // Product image thumbnail (Shopify image if available, else status icon)
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: p.shopifyImageUrl.isNotEmpty
+                        ? Colors.white
+                        : (hasSku ? AppTheme.accentColor.withOpacity(0.08) : AppTheme.warningColor.withOpacity(0.08)),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: p.shopifyImageUrl.isNotEmpty
+                          ? AppTheme.dividerColor
+                          : (hasSku ? AppTheme.accentColor.withOpacity(0.3) : AppTheme.warningColor.withOpacity(0.3)),
+                      width: 1,
+                    ),
+                  ),
+                  child: p.shopifyImageUrl.isNotEmpty
+                      ? ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: Image.network(
+                            p.shopifyImageUrl,
+                            fit: BoxFit.contain,
+                            errorBuilder: (_, __, ___) => Icon(Icons.image_not_supported, size: 18, color: AppTheme.textTertiary),
+                            loadingBuilder: (_, child, progress) =>
+                                progress == null ? child : const Center(child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.5))),
+                          ),
+                        )
+                      : Icon(
+                          hasSku ? Icons.check : Icons.qr_code_scanner,
+                          size: 18,
+                          color: hasSku ? AppTheme.accentColor : AppTheme.warningColor,
+                        ),
+                ),
+                const SizedBox(width: 10),
+
+                // Product name + SKU
                 Expanded(
-                  child: Text(
-                    p.name,
-                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppTheme.textPrimary),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        p.name,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppTheme.textPrimary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (hasSku)
+                        Text(
+                          p.sku,
+                          style: TextStyle(fontSize: 11, color: AppTheme.textTertiary, fontFamily: 'monospace'),
+                        )
+                      else
+                        Text(
+                          'Tap to scan SKU',
+                          style: TextStyle(fontSize: 11, color: AppTheme.warningColor, fontStyle: FontStyle.italic),
+                        ),
+                    ],
                   ),
                 ),
-                // Delete button
-                IconButton(
-                  icon: Icon(Icons.close, size: 16, color: AppTheme.errorColor.withOpacity(0.5)),
-                  onPressed: () => _confirmDeleteProduct(context, productProvider, p),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                  splashRadius: 18,
-                ),
+
+                // Action buttons
+                if (!hasSku) ...[
+                  // Manual entry
+                  IconButton(
+                    icon: Icon(Icons.keyboard, size: 18, color: AppTheme.textSecondary),
+                    tooltip: 'Enter SKU manually',
+                    onPressed: () => _manualSkuEntry(p),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                  // Scan
+                  IconButton(
+                    icon: Icon(Icons.qr_code_scanner, size: 18, color: AppTheme.warningColor),
+                    tooltip: 'Scan barcode',
+                    onPressed: () => _scanForProduct(p),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                ] else ...[
+                  // Navigate arrow for linked products
+                  Icon(Icons.chevron_right, size: 20, color: AppTheme.textTertiary),
+                ],
+
+                // Delete — admin only
+                if (context.read<AuthProvider>().hasPermission(AppRoles.deleteProduct))
+                  IconButton(
+                    icon: Icon(Icons.close, size: 14, color: AppTheme.errorColor.withOpacity(0.4)),
+                    onPressed: () => _confirmDeleteProduct(context, productProvider, p),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                    splashRadius: 16,
+                  ),
               ],
             ),
           ),
@@ -248,7 +454,6 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
                 labelText: 'Vendor Name',
                 prefixIcon: Icon(Icons.business, size: 20),
               ),
-              autofocus: false,
             ),
             const SizedBox(height: 16),
             TextField(
@@ -284,12 +489,8 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
               if (ctx.mounted) Navigator.pop(ctx);
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Vendor updated'),
-                    backgroundColor: Colors.green,
-                  ),
+                  const SnackBar(content: Text('Vendor updated'), backgroundColor: Colors.green),
                 );
-                // Pop and re-navigate to refresh the screen with updated vendor
                 Navigator.pop(context);
               }
             },
@@ -323,8 +524,9 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
             TextField(
               controller: skuController,
               decoration: const InputDecoration(
-                labelText: 'SKU / Barcode',
+                labelText: 'SKU / Barcode (optional)',
                 prefixIcon: Icon(Icons.qr_code, size: 20),
+                helperText: 'You can scan it later',
               ),
             ),
           ],
@@ -341,12 +543,6 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
                   sku: skuController.text.trim(),
                   pcsPerCase: 1,
                   pcsPerLine: 1,
-                  storePrice: 0,
-                  onlinePrice: 0,
-                  storeCasePrice: 0,
-                  onlineCasePrice: 0,
-                  pcCost: 0,
-                  caseCost: 0,
                   reorderRule: ReorderRule(minStockPcs: 0, defaultOrderQty: 0),
                   createdAt: DateTime.now(),
                 );
@@ -383,4 +579,99 @@ class _VendorDetailScreenState extends State<VendorDetailScreen> {
   }
 }
 
-// End of file
+// ─── Barcode Scanner Page (scan-to-link) ──────────────────────
+class _BarcodeScannerPage extends StatefulWidget {
+  final String productName;
+  const _BarcodeScannerPage({required this.productName});
+
+  @override
+  State<_BarcodeScannerPage> createState() => _BarcodeScannerPageState();
+}
+
+class _BarcodeScannerPageState extends State<_BarcodeScannerPage> {
+  final MobileScannerController _controller = MobileScannerController();
+  bool _hasScanned = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_hasScanned) return;
+    final barcode = capture.barcodes.firstOrNull;
+    if (barcode != null && barcode.rawValue != null && barcode.rawValue!.isNotEmpty) {
+      setState(() => _hasScanned = true);
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (mounted) Navigator.pop(context, barcode.rawValue!);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Scan SKU', style: TextStyle(fontSize: 16)),
+            Text(widget.productName, style: const TextStyle(fontSize: 11, color: Colors.white60)),
+          ],
+        ),
+        actions: [
+          IconButton(icon: const Icon(Icons.flash_on), onPressed: () => _controller.toggleTorch(), tooltip: 'Flash'),
+          IconButton(icon: const Icon(Icons.cameraswitch), onPressed: () => _controller.switchCamera(), tooltip: 'Switch'),
+        ],
+      ),
+      body: Stack(
+        children: [
+          MobileScanner(controller: _controller, onDetect: _onDetect),
+          Center(
+            child: Container(
+              width: 280,
+              height: 160,
+              decoration: BoxDecoration(
+                border: Border.all(color: _hasScanned ? AppTheme.accentColor : Colors.white, width: 3),
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+          ),
+          // Product name banner
+          Positioned(
+            top: 16,
+            left: 16,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
+              child: Text(
+                'Scanning for: ${widget.productName}',
+                style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 100,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
+                child: Text(
+                  _hasScanned ? 'Scanned!' : 'Point at barcode',
+                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

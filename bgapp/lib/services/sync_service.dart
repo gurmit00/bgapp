@@ -98,6 +98,21 @@ class SyncService {
     return 'https://$_storeDomain/search?q=${Uri.encodeComponent(sku)}';
   }
 
+  /// Fetches all SKUs and barcodes from Shopify in one bulk call.
+  /// Returns a Set containing every sku and barcode string on Shopify.
+  Future<Set<String>> fetchAllShopifySkus() async {
+    final baseUrl = _proxyUrl.isNotEmpty ? _proxyUrl : _defaultProxyUrl;
+    final url = Uri.parse('$baseUrl/all-skus');
+    final response = await http.get(url).timeout(const Duration(seconds: 60));
+    if (response.statusCode != 200) {
+      throw Exception('all-skus failed: ${response.statusCode}');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final skus = List<String>.from(data['skus'] ?? []);
+    final barcodes = List<String>.from(data['barcodes'] ?? []);
+    return {...skus, ...barcodes};
+  }
+
   /// Search for a product by barcode/SKU via the proxy.
   Future<Map<String, dynamic>?> findProductBySku(String sku) async {
     if (sku.isEmpty) return null;
@@ -160,6 +175,7 @@ class SyncService {
     String? tags,
     bool? taxable,
     String? imageBase64,
+    String? backImageBase64,
   }) async {
     final baseUrl = _proxyUrl.isNotEmpty ? _proxyUrl : _defaultProxyUrl;
 
@@ -177,10 +193,14 @@ class SyncService {
       };
       if (taxable != null) body['taxable'] = taxable;
 
-      // If base64 image provided, send it directly for Shopify attachment
+      // If base64 image(s) provided, send directly for Shopify attachment
       if (imageBase64 != null && imageBase64.isNotEmpty) {
         body['imageBase64'] = imageBase64;
         debugPrint('Sending imageBase64 to proxy (${imageBase64.length} chars)');
+      }
+      if (backImageBase64 != null && backImageBase64.isNotEmpty) {
+        body['backImageBase64'] = backImageBase64;
+        debugPrint('Sending backImageBase64 to proxy (${backImageBase64.length} chars)');
       }
 
       // Also try to look up existing image URL from Firebase Storage
@@ -211,7 +231,7 @@ class SyncService {
         url,
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(body),
-      ).timeout(const Duration(seconds: 30));
+      ).timeout(const Duration(seconds: 90)); // 90s — covers search + update + back image POST to Shopify
 
       debugPrint('Shopify sync response: ${response.statusCode}');
 
@@ -228,6 +248,48 @@ class SyncService {
     } catch (e) {
       debugPrint('Shopify sync exception: $e');
       return {'success': false, 'error': '$e'};
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  BACKGROUND REMOVAL – Replicate rembg via proxy
+  // ════════════════════════════════════════════════════════════
+
+  /// Remove background from a product image.
+  /// Sends base64 JPEG/PNG to proxy → Replicate rembg → returns transparent PNG base64.
+  /// Fetches all active Shopify products from the public storefront via proxy.
+  /// Returns list of maps with: handle, title, sku, taxable, tags, imageUrl.
+  Future<List<Map<String, dynamic>>> getShopifyActiveProducts() async {
+    final baseUrl = _proxyUrl.isNotEmpty ? _proxyUrl : _defaultProxyUrl;
+    final url = Uri.parse('$baseUrl/shopify-active-products');
+    final response = await http.get(url).timeout(const Duration(seconds: 60));
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      if (data['success'] == true) {
+        return List<Map<String, dynamic>>.from(data['products'] as List);
+      }
+    }
+    throw Exception('Failed to fetch Shopify products: ${response.statusCode}');
+  }
+
+  Future<String?> removeBackground(String imageBase64) async {
+    final baseUrl = _proxyUrl.isNotEmpty ? _proxyUrl : _defaultProxyUrl;
+    try {
+      final url = Uri.parse('$baseUrl/remove-bg');
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'imageBase64': imageBase64}),
+      ).timeout(const Duration(seconds: 60)); // rembg can take 5-15s on cold start
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) return data['imageBase64'] as String?;
+      }
+      debugPrint('removeBackground failed: ${response.statusCode} ${response.body}');
+      return null;
+    } catch (e) {
+      debugPrint('removeBackground error: $e');
+      return null;
     }
   }
 
@@ -337,21 +399,25 @@ class SyncService {
   /// Upload updateproduct.PLU content via the Cloud Run proxy, which
   /// handles Firebase Storage upload server-side (no browser CORS issues).
   ///
-  /// Stored at: `pos-imports/updateproduct.PLU` (latest)
-  /// Also archived: `pos-imports/archive/updateproduct_<timestamp>.PLU`
+  /// Store-specific: `pos-imports/{storeName}/updateproduct.PLU`
+  /// Also archived: `pos-imports/{storeName}/archive/updateproduct_<timestamp>.PLU`
   ///
   /// Returns the download URL on success, null on error.
-  Future<String?> uploadNewCodesToCloud(String newCodesContent) async {
+  Future<String?> uploadNewCodesToCloud(String newCodesContent, {String? storeName}) async {
     final baseUrl = _proxyUrl.isNotEmpty ? _proxyUrl : _defaultProxyUrl;
 
     try {
-      debugPrint('uploadNewCodesToCloud: POSTing ${newCodesContent.length} chars to proxy...');
+      debugPrint('uploadNewCodesToCloud: POSTing ${newCodesContent.length} chars → ${storeName ?? 'default'}');
 
       final url = Uri.parse('$baseUrl/upload-pos-file');
+      final body = <String, dynamic>{'content': newCodesContent};
+      if (storeName != null && storeName.isNotEmpty) {
+        body['storeName'] = storeName;
+      }
       final response = await http.post(
         url,
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'content': newCodesContent}),
+        body: jsonEncode(body),
       ).timeout(const Duration(seconds: 30));
 
       debugPrint('uploadNewCodesToCloud: response ${response.statusCode}');

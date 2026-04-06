@@ -14,7 +14,7 @@ app.use(express.json({ limit: '50mb' }));
 
 // Shopify credentials — same store as the orders proxy
 const SHOPIFY_SHOP = process.env.SHOPIFY_SHOP || 'apnirootsgrocery.myshopify.com';
-const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN || 'xx';
+const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
 const API_VERSION = '2024-01';
 
@@ -311,9 +311,9 @@ app.put('/update-product', async (req, res) => {
 
 // ─── Upsert: Create or Update based on SKU lookup ───────────
 // POST /sync-product
-// Body: { title, sku, barcode, price, description, vendor, productType, imageUrl, imageBase64, tags, taxable }
+// Body: { title, sku, barcode, price, description, vendor, productType, imageUrl, imageBase64, backImageBase64, tags, taxable }
 app.post('/sync-product', async (req, res) => {
-  const { title, sku, barcode, price, description, vendor, productType, imageUrl, imageBase64, tags, taxable } = req.body;
+  const { title, sku, barcode, price, description, vendor, productType, imageUrl, imageBase64, backImageBase64, tags, taxable } = req.body;
 
   if (!sku && !barcode) {
     return res.status(400).json({ error: 'Need at least sku or barcode to sync' });
@@ -360,7 +360,7 @@ app.post('/sync-product', async (req, res) => {
       }
       if (imageBase64) {
         updatePayload.product.images = [{ attachment: imageBase64 }];
-        console.log(`[sync-product] Using base64 image for update (${imageBase64.length} chars)`);
+        console.log(`[sync-product] Using base64 front image for update`);
       } else if (imageUrl) {
         updatePayload.product.images = [{ src: imageUrl }];
       }
@@ -374,6 +374,20 @@ app.post('/sync-product', async (req, res) => {
       });
 
       const updated = updateResp.data.product;
+
+      // Add back image separately via the Images API — more reliable than bundling both attachments
+      if (backImageBase64) {
+        try {
+          const imgUrl = `https://${SHOPIFY_SHOP}/admin/api/${API_VERSION}/products/${shopifyNumericId}/images.json`;
+          await axios.post(imgUrl, { image: { attachment: backImageBase64, position: 2 } }, {
+            headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN, 'Content-Type': 'application/json' },
+          });
+          console.log(`[sync-product] Back image added to product ${shopifyNumericId}`);
+        } catch (imgErr) {
+          console.error(`[sync-product] Back image upload failed:`, imgErr.response?.data || imgErr.message);
+        }
+      }
+
       const fv = updated.variants?.[0] || {};
       return res.json({
         success: true,
@@ -415,7 +429,7 @@ app.post('/sync-product', async (req, res) => {
       };
       if (imageBase64) {
         productPayload.product.images = [{ attachment: imageBase64 }];
-        console.log(`[sync-product] Using base64 image for create (${imageBase64.length} chars)`);
+        console.log(`[sync-product] Using base64 front image for create`);
       } else if (imageUrl) {
         productPayload.product.images = [{ src: imageUrl }];
       }
@@ -429,6 +443,20 @@ app.post('/sync-product', async (req, res) => {
       });
 
       const created = createResp.data.product;
+
+      // Add back image separately via the Images API
+      if (backImageBase64 && (imageBase64 || imageUrl)) {
+        try {
+          const imgUrl = `https://${SHOPIFY_SHOP}/admin/api/${API_VERSION}/products/${created.id}/images.json`;
+          await axios.post(imgUrl, { image: { attachment: backImageBase64, position: 2 } }, {
+            headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN, 'Content-Type': 'application/json' },
+          });
+          console.log(`[sync-product] Back image added to new product ${created.id}`);
+        } catch (imgErr) {
+          console.error(`[sync-product] Back image upload failed:`, imgErr.response?.data || imgErr.message);
+        }
+      }
+
       const fv = created.variants?.[0] || {};
       return res.json({
         success: true,
@@ -452,6 +480,115 @@ app.post('/sync-product', async (req, res) => {
     console.error('[sync-product] Error:', err.response?.data || err.message);
     const status = err.response?.status || 500;
     return res.status(status).json({ error: err.response?.data || err.message });
+  }
+});
+
+// ─── Bulk fetch all Shopify SKUs + barcodes (for missing-check) ─
+// GET /all-skus
+// Returns { skus: Set<string>, barcodes: Set<string> } as arrays
+app.get('/all-skus', async (req, res) => {
+  console.log('[all-skus] Fetching all variant SKUs and barcodes from Shopify...');
+  try {
+    const skus = new Set();
+    const barcodes = new Set();
+    let cursor = null;
+    let page = 0;
+
+    while (true) {
+      page++;
+      const afterClause = cursor ? `, after: "${cursor}"` : '';
+      const gql = `
+        {
+          productVariants(first: 250${afterClause}) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node { sku barcode }
+            }
+          }
+        }
+      `;
+
+      const url = `https://${SHOPIFY_SHOP}/admin/api/${API_VERSION}/graphql.json`;
+      const response = await axios.post(url, { query: gql }, {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = response.data?.data?.productVariants;
+      if (!data) break;
+
+      for (const edge of data.edges) {
+        const { sku, barcode } = edge.node;
+        if (sku) skus.add(sku.trim());
+        if (barcode) barcodes.add(barcode.trim());
+      }
+
+      console.log(`[all-skus] Page ${page}: ${data.edges.length} variants, total skus=${skus.size} barcodes=${barcodes.size}`);
+
+      if (!data.pageInfo.hasNextPage) break;
+      cursor = data.pageInfo.endCursor;
+    }
+
+    return res.json({ skus: Array.from(skus), barcodes: Array.from(barcodes) });
+  } catch (err) {
+    console.error('[all-skus] Error:', err.response?.data || err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Background removal via Replicate rembg ─────────────────
+// POST /remove-bg
+// Body: { imageBase64: "<base64 string>" }
+// Returns: { success: true, imageBase64: "<transparent PNG base64>" }
+app.post('/remove-bg', async (req, res) => {
+  const { imageBase64 } = req.body;
+  if (!imageBase64) return res.status(400).json({ error: 'Missing imageBase64' });
+
+  const token = process.env.REPLICATE_TOKEN;
+  if (!token) return res.status(500).json({ error: 'REPLICATE_TOKEN not configured' });
+
+  try {
+    // Detect image type from base64 prefix
+    const mimeType = imageBase64.startsWith('iVBOR') ? 'image/png' : 'image/jpeg';
+    const dataUri = `data:${mimeType};base64,${imageBase64}`;
+
+    // Create prediction on Replicate using versioned endpoint
+    const createResp = await axios.post(
+      'https://api.replicate.com/v1/predictions',
+      {
+        version: 'fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003', // cjwbw/rembg latest
+        input: { image: dataUri },
+      },
+      { headers: { 'Authorization': `Token ${token}`, 'Content-Type': 'application/json' } }
+    );
+    const predictionId = createResp.data.id;
+    console.log(`[remove-bg] Prediction created: ${predictionId}`);
+
+    // Poll until complete (max 60s — rembg cold starts can be slow)
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const pollResp = await axios.get(
+        `https://api.replicate.com/v1/predictions/${predictionId}`,
+        { headers: { 'Authorization': `Token ${token}` } }
+      );
+      const { status, output, error } = pollResp.data;
+      if (status === 'succeeded' && output) {
+        // output is a URL to a transparent PNG — download and return as base64
+        const imgResp = await axios.get(output, { responseType: 'arraybuffer' });
+        const b64 = Buffer.from(imgResp.data).toString('base64');
+        console.log(`[remove-bg] Done — ${(b64.length * 3 / 4 / 1024).toFixed(0)} KB PNG`);
+        return res.json({ success: true, imageBase64: b64 });
+      }
+      if (status === 'failed' || status === 'canceled') {
+        return res.status(500).json({ error: error || 'Prediction failed' });
+      }
+    }
+    return res.status(504).json({ error: 'Timeout waiting for background removal' });
+  } catch (err) {
+    console.error('[remove-bg] Error:', err.response?.data || err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -619,22 +756,32 @@ app.post('/generate-pos-import', async (req, res) => {
 
 // ─── Upload POS file to Firebase Storage (server-side) ──────
 // POST /upload-pos-file
-// Body: { content: "<file content string>" }
+// Body: { content: "<file content string>", storeName?: "BG Mississauga" }
+//
+// Store-specific folders:
+//   pos-imports/BG Mississauga/updateproduct.PLU
+//   pos-imports/BG Oakville/updateproduct.PLU
+// Falls back to pos-imports/updateproduct.PLU if no storeName.
 //
 // This bypasses the browser Firebase Storage SDK entirely.
 // The proxy uploads to Firebase Storage server-side using Admin SDK,
 // which has no CORS issues.
 app.post('/upload-pos-file', async (req, res) => {
-  const { content } = req.body;
+  const { content, storeName } = req.body;
   if (!content || typeof content !== 'string') {
     return res.status(400).json({ error: 'Missing content string' });
   }
 
-  console.log(`[upload-pos-file] Uploading ${content.length} chars to Firebase Storage`);
+  // Store-specific folder, sanitized for safe paths
+  const folder = storeName
+    ? `pos-imports/${storeName.replace(/[^a-zA-Z0-9_ -]/g, '')}`
+    : 'pos-imports';
+
+  console.log(`[upload-pos-file] Uploading ${content.length} chars → ${folder}/updateproduct.PLU`);
 
   try {
     const bucket = admin.storage().bucket();
-    const latestFile = bucket.file('pos-imports/updateproduct.PLU');
+    const latestFile = bucket.file(`${folder}/updateproduct.PLU`);
 
     // Upload the latest file
     await latestFile.save(content, {
@@ -643,6 +790,7 @@ app.post('/upload-pos-file', async (req, res) => {
         metadata: {
           uploadedAt: new Date().toISOString(),
           source: 'sync-proxy',
+          storeName: storeName || 'default',
         },
       },
     });
@@ -652,11 +800,11 @@ app.post('/upload-pos-file', async (req, res) => {
     await latestFile.makePublic();
 
     // Get the public URL
-    const publicUrl = `https://storage.googleapis.com/${bucket.name}/pos-imports/updateproduct.PLU`;
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${folder}/updateproduct.PLU`;
 
     // Archive a timestamped copy (fire-and-forget)
     const ts = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-    const archiveFile = bucket.file(`pos-imports/archive/updateproduct_${ts}.PLU`);
+    const archiveFile = bucket.file(`${folder}/archive/updateproduct_${ts}.PLU`);
     archiveFile.save(content, { contentType: 'text/plain' }).catch(err => {
       console.log(`[upload-pos-file] Archive failed (non-critical): ${err.message}`);
     });
@@ -667,12 +815,48 @@ app.post('/upload-pos-file', async (req, res) => {
       success: true,
       downloadUrl: publicUrl,
       publicUrl,
+      folder,
+      storeName: storeName || null,
       size: content.length,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
     console.error('[upload-pos-file] Error:', err.message);
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── UberEats: fetch all active products from public storefront ─
+// GET /shopify-active-products
+// No auth needed — reads public apniroots.com/products.json
+app.get('/shopify-active-products', async (req, res) => {
+  try {
+    const products = [];
+    let page = 1;
+    while (true) {
+      const resp = await axios.get(`https://apniroots.com/products.json?limit=250&page=${page}`);
+      const batch = resp.data.products || [];
+      if (batch.length === 0) break;
+      products.push(...batch);
+      if (batch.length < 250) break;
+      page++;
+    }
+    console.log(`[shopify-active-products] Fetched ${products.length} products across ${page} page(s)`);
+
+    const result = products.map(p => ({
+      handle:   p.handle || '',
+      title:    p.title  || '',
+      sku:      p.variants?.[0]?.sku      || '',
+      price:    p.variants?.[0]?.price    || '0.00',
+      taxable:  p.variants?.[0]?.taxable  ?? false,
+      tags:     Array.isArray(p.tags) ? p.tags.join(', ') : (p.tags || ''),
+      imageUrl: p.images?.[0]?.src || '',
+    }));
+
+    res.json({ success: true, products: result });
+  } catch (err) {
+    console.error('[shopify-active-products] Error:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 

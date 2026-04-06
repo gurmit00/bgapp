@@ -376,7 +376,7 @@ class LabelQueueItem {
   factory LabelQueueItem.fromMap(Map<String, dynamic> map) {
     return LabelQueueItem(
       id: map['id'] ?? '',
-      sku: map['sku'] ?? '',
+      sku: (map['sku'] ?? '').toString(),
       productName: map['productName'] ?? '',
       reason: map['reason'] ?? 'missing',
       correctPrice: (map['correctPrice'] ?? 0).toDouble(),
@@ -465,6 +465,8 @@ class Store {
   final String name;
   final String address;
   final String phone;
+  final String pluCsvUrl;
+  final DateTime? pluUploadedAt;
   final DateTime createdAt;
 
   Store({
@@ -472,8 +474,12 @@ class Store {
     required this.name,
     required this.address,
     required this.phone,
+    this.pluCsvUrl = '',
+    this.pluUploadedAt,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
+
+  bool get hasPlu => pluCsvUrl.isNotEmpty;
 
   Map<String, dynamic> toMap() {
     return {
@@ -481,6 +487,8 @@ class Store {
       'name': name,
       'address': address,
       'phone': phone,
+      'pluCsvUrl': pluCsvUrl,
+      if (pluUploadedAt != null) 'pluUploadedAt': pluUploadedAt!.toIso8601String(),
       'createdAt': createdAt.toIso8601String(),
     };
   }
@@ -491,6 +499,10 @@ class Store {
       name: map['name'] ?? '',
       address: map['address'] ?? '',
       phone: map['phone'] ?? '',
+      pluCsvUrl: map['pluCsvUrl'] ?? '',
+      pluUploadedAt: map['pluUploadedAt'] != null
+          ? DateTime.parse(map['pluUploadedAt'])
+          : null,
       createdAt: map['createdAt'] != null
           ? DateTime.parse(map['createdAt'])
           : DateTime.now(),
@@ -558,6 +570,9 @@ class Product {
   final String id;
   final String vendorId;
   final String name;
+  /// The product name as it appears in the order list. Set once when the product
+  /// is first created and never overwritten by SKU scans or PLU lookups.
+  final String orderListProductName;
   final String sku;
   final int pcsPerCase;
   final int pcsPerLine;
@@ -601,6 +616,7 @@ class Product {
     required this.id,
     required this.vendorId,
     required this.name,
+    this.orderListProductName = '',
     required this.sku,
     required this.pcsPerCase,
     required this.pcsPerLine,
@@ -639,6 +655,7 @@ class Product {
       'id': id,
       'vendorId': vendorId,
       'name': name,
+      'orderListProductName': orderListProductName.isNotEmpty ? orderListProductName : name,
       'sku': sku,
       'pcsPerCase': pcsPerCase,
       'pcsPerLine': pcsPerLine,
@@ -679,7 +696,10 @@ class Product {
       id: map['id'] ?? '',
       vendorId: map['vendorId'] ?? '',
       name: map['name'] ?? '',
-      sku: map['sku'] ?? '',
+      orderListProductName: (map['orderListProductName'] as String?)?.isNotEmpty == true
+          ? map['orderListProductName']
+          : map['name'] ?? '',
+      sku: (map['sku'] ?? '').toString(),
       pcsPerCase: map['pcsPerCase'] ?? 0,
       pcsPerLine: map['pcsPerLine'] ?? 0,
       storePrice: storePrice,
@@ -832,4 +852,98 @@ class User {
       photoUrl: map['photoUrl'],
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CROSS-STORE PRODUCT — aggregated product view across stores
+// ═══════════════════════════════════════════════════════════════
+
+/// A product grouped by SKU across multiple stores.
+class CrossStoreProduct {
+  final String sku;
+  final String name;
+  final Map<String, StoreProductRef> storeRefs; // storeId → ref
+
+  CrossStoreProduct({
+    required this.sku,
+    required this.name,
+    required this.storeRefs,
+  });
+
+  int get storeCount => storeRefs.length;
+  List<String> get storeIds => storeRefs.keys.toList();
+  List<StoreProductRef> get refs => storeRefs.values.toList();
+}
+
+/// Reference to a specific product instance in a store/vendor.
+class StoreProductRef {
+  final String storeId;
+  final String storeName;
+  final String vendorId;
+  final String vendorName;
+  final String productId;
+  final Product product;
+
+  StoreProductRef({
+    required this.storeId,
+    required this.storeName,
+    required this.vendorId,
+    required this.vendorName,
+    required this.productId,
+    required this.product,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MULTI-STORE HUB STATUS — hydration across N stores + Shopify
+// ═══════════════════════════════════════════════════════════════
+
+/// PLU lookup result for a single store.
+class StorePLUResult {
+  final String storeId;
+  final String storeName;
+  final bool checked;
+  final bool found;
+  final PLUProduct? pluProduct;
+
+  StorePLUResult({
+    required this.storeId,
+    required this.storeName,
+    this.checked = false,
+    this.found = false,
+    this.pluProduct,
+  });
+}
+
+/// Hydration result for a product across multiple stores + Shopify.
+class MultiStoreHubStatus {
+  final Map<String, StorePLUResult> storeResults; // storeId → PLU result
+  final bool shopifyChecked;
+  final bool inShopify;
+  final Map<String, dynamic>? shopifyProduct;
+  final List<ProductConflict> conflicts;
+
+  MultiStoreHubStatus({
+    this.storeResults = const {},
+    this.shopifyChecked = false,
+    this.inShopify = false,
+    this.shopifyProduct,
+    this.conflicts = const [],
+  });
+
+  factory MultiStoreHubStatus.empty() => MultiStoreHubStatus();
+
+  bool get isFullyChecked =>
+      storeResults.values.every((r) => r.checked) && shopifyChecked;
+  bool get hasConflicts => conflicts.isNotEmpty;
+
+  String get shopifyImageUrl =>
+      (inShopify && shopifyProduct != null)
+          ? (shopifyProduct!['image'] as String? ?? '')
+          : '';
+
+  String get shopifyPublicUrl =>
+      (inShopify && shopifyProduct != null)
+          ? (shopifyProduct!['publicUrl'] as String? ?? '')
+          : '';
 }
