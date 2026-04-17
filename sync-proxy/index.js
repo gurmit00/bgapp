@@ -41,18 +41,11 @@ app.get('/product-by-sku', async (req, res) => {
       return res.json({ found: true, match: 'barcode', product });
     }
 
-    // Strategy 2: Search by variant SKU field
+    // Strategy 2: Search by variant SKU field (exact match only)
     product = await searchProducts(`sku:${sku}`);
     if (product) {
       console.log(`[product-by-sku] Found by sku: ${product.title}`);
       return res.json({ found: true, match: 'sku', product });
-    }
-
-    // Strategy 3: General title/body search (loose match)
-    product = await searchProducts(sku);
-    if (product) {
-      console.log(`[product-by-sku] Found by general search: ${product.title}`);
-      return res.json({ found: true, match: 'loose', product });
     }
 
     console.log(`[product-by-sku] Not found: ${sku}`);
@@ -851,6 +844,7 @@ app.get('/shopify-active-products', async (req, res) => {
       taxable:  p.variants?.[0]?.taxable  ?? false,
       tags:     Array.isArray(p.tags) ? p.tags.join(', ') : (p.tags || ''),
       imageUrl: p.images?.[0]?.src || '',
+      weightGrams: p.variants?.[0]?.grams || null,
     }));
 
     res.json({ success: true, products: result });

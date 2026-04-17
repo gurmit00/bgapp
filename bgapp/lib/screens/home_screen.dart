@@ -18,7 +18,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  int _selectedIndex = 2;
+  int _selectedIndex = 2; // Open on Orders tab
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   @override
@@ -26,6 +26,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<StoreProvider>().loadStores();
+      context.read<OrderProvider>().loadAllOrders();
     });
   }
 
@@ -191,11 +192,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   // ── Online Platforms submenu ─────────────────
                   Builder(builder: (ctx) {
                     final auth = ctx.read<AuthProvider>();
-                    final hasUberExport     = auth.hasPermission(AppRoles.exportUberEats);
-                    final hasUberMarkup     = auth.hasPermission(AppRoles.uberMarkup);
+                    final hasUberExport      = auth.hasPermission(AppRoles.exportUberEats);
+                    final hasUberMarkup      = auth.hasPermission(AppRoles.uberMarkup);
+                    final hasUberSections    = auth.hasPermission(AppRoles.uberSections);
                     final hasInstacartExport = auth.hasPermission(AppRoles.exportInstacart);
                     final hasInstacartMarkup = auth.hasPermission(AppRoles.instacartMarkup);
-                    if (!hasUberExport && !hasUberMarkup && !hasInstacartExport && !hasInstacartMarkup) {
+                    if (!hasUberExport && !hasUberMarkup && !hasUberSections && !hasInstacartExport && !hasInstacartMarkup) {
                       return const SizedBox.shrink();
                     }
                     return Theme(
@@ -217,6 +219,12 @@ class _HomeScreenState extends State<HomeScreen> {
                               icon: Icons.tune_rounded,
                               label: 'Uber Markup',
                               onTap: () { Navigator.pop(ctx); Navigator.of(ctx).pushNamed('/uber-markup'); },
+                            ),
+                          if (hasUberSections)
+                            _DrawerItem(
+                              icon: Icons.category_outlined,
+                              label: 'Uber Sections',
+                              onTap: () { Navigator.pop(ctx); Navigator.of(ctx).pushNamed('/uber-sections'); },
                             ),
                           if (hasInstacartExport)
                             _DrawerItem(
@@ -897,12 +905,28 @@ class _OrdersTabState extends State<_OrdersTab> {
     if (_vendorCache.containsKey(storeId) && _vendorCache[storeId]!.containsKey(vendorId)) {
       return _vendorCache[storeId]![vendorId];
     }
-    // Load all vendors for this store and cache them
     if (!_vendorCache.containsKey(storeId)) {
       final vendors = await _firebaseService.getVendors(storeId);
       _vendorCache[storeId] = {for (var v in vendors) v.id: v};
     }
     return _vendorCache[storeId]?[vendorId];
+  }
+
+  // Returns the Monday of the week containing [date]
+  DateTime _weekStart(DateTime date) {
+    final d = DateTime(date.year, date.month, date.day);
+    return d.subtract(Duration(days: d.weekday - 1));
+  }
+
+  String _weekLabel(DateTime weekStart) {
+    final weekEnd = weekStart.add(const Duration(days: 6));
+    if (weekStart.year == weekEnd.year && weekStart.month == weekEnd.month) {
+      return '${DateFormat('MMM d').format(weekStart)}–${DateFormat('d, yyyy').format(weekEnd)}';
+    }
+    if (weekStart.year == weekEnd.year) {
+      return '${DateFormat('MMM d').format(weekStart)} – ${DateFormat('MMM d, yyyy').format(weekEnd)}';
+    }
+    return '${DateFormat('MMM d, yyyy').format(weekStart)} – ${DateFormat('MMM d, yyyy').format(weekEnd)}';
   }
 
   @override
@@ -929,30 +953,34 @@ class _OrdersTabState extends State<_OrdersTab> {
                 const SizedBox(height: 20),
                 Text('No orders yet', style: Theme.of(context).textTheme.headlineSmall),
                 const SizedBox(height: 8),
-                Text('Orders will appear here after creation', style: Theme.of(context).textTheme.bodyMedium),
+                Text('Orders will appear here after creation',
+                    style: Theme.of(context).textTheme.bodyMedium),
               ],
             ),
           );
         }
 
-        // Group orders by storeId
-        final grouped = <String, List<Order>>{};
+        // Group orders by week (most recent week first)
+        final groupedByWeek = <DateTime, List<Order>>{};
         for (final order in orderProvider.orders) {
-          grouped.putIfAbsent(order.storeId, () => []).add(order);
+          final ws = _weekStart(order.createdAt);
+          groupedByWeek.putIfAbsent(ws, () => []).add(order);
+        }
+        final sortedWeeks = groupedByWeek.keys.toList()
+          ..sort((a, b) => b.compareTo(a));
+        for (final week in sortedWeeks) {
+          groupedByWeek[week]!.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         }
 
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
           children: [
-            for (final storeId in grouped.keys) ...[
+            for (final weekStart in sortedWeeks) ...[
               Padding(
                 padding: const EdgeInsets.only(top: 12, bottom: 4, left: 4),
                 child: Text(
-                  storeProvider.stores
-                      .where((s) => s.id == storeId)
-                      .map((s) => s.name)
-                      .firstOrNull ?? 'Unknown Store',
-                  style: TextStyle(
+                  _weekLabel(weekStart),
+                  style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
                     color: AppTheme.textTertiary,
@@ -960,17 +988,19 @@ class _OrdersTabState extends State<_OrdersTab> {
                   ),
                 ),
               ),
-              for (final order in grouped[storeId]!) ...[
+              for (final order in groupedByWeek[weekStart]!)
                 FutureBuilder<Vendor?>(
                   future: _getVendor(order.storeId, order.vendorId),
                   builder: (context, snapshot) {
                     final vendor = snapshot.data;
                     final vendorName = vendor?.name ?? 'Loading…';
                     final storeName = storeProvider.stores
-                        .where((s) => s.id == storeId)
-                        .map((s) => s.name)
-                        .firstOrNull ?? 'Unknown Store';
-                    final dateStr = DateFormat('MMM dd, yyyy · h:mm a').format(order.createdAt);
+                            .where((s) => s.id == order.storeId)
+                            .map((s) => s.name)
+                            .firstOrNull ??
+                        'Unknown Store';
+                    final dateStr =
+                        DateFormat('MMM dd, yyyy · h:mm a').format(order.createdAt);
 
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 4),
@@ -980,15 +1010,22 @@ class _OrdersTabState extends State<_OrdersTab> {
                         dateStr: dateStr,
                         status: order.status,
                         itemCount: order.items.length,
-                        canDelete: context.read<AuthProvider>().hasPermission(AppRoles.deleteOrder),
+                        canDelete: context
+                            .read<AuthProvider>()
+                            .hasPermission(AppRoles.deleteOrder),
                         onTap: () {
                           final store = storeProvider.stores
-                              .where((s) => s.id == order.storeId).firstOrNull;
+                              .where((s) => s.id == order.storeId)
+                              .firstOrNull;
                           if (vendor != null && store != null) {
                             orderProvider.setCurrentOrderForEditing(order);
                             Navigator.of(context).pushNamed(
                               '/order-creation',
-                              arguments: {'store': store, 'vendor': vendor, 'editingOrder': order},
+                              arguments: {
+                                'store': store,
+                                'vendor': vendor,
+                                'editingOrder': order
+                              },
                             );
                           }
                         },
@@ -997,11 +1034,15 @@ class _OrdersTabState extends State<_OrdersTab> {
                             context: context,
                             builder: (ctx) => AlertDialog(
                               title: const Text('Delete Order'),
-                              content: const Text('Are you sure you want to delete this order?'),
+                              content: const Text(
+                                  'Are you sure you want to delete this order?'),
                               actions: [
-                                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                                TextButton(
+                                    onPressed: () => Navigator.pop(ctx, false),
+                                    child: const Text('Cancel')),
                                 ElevatedButton(
-                                  style: ElevatedButton.styleFrom(backgroundColor: AppTheme.errorColor),
+                                  style: ElevatedButton.styleFrom(
+                                      backgroundColor: AppTheme.errorColor),
                                   onPressed: () => Navigator.pop(ctx, true),
                                   child: const Text('Delete'),
                                 ),
@@ -1016,7 +1057,6 @@ class _OrdersTabState extends State<_OrdersTab> {
                     );
                   },
                 ),
-              ],
             ],
           ],
         );

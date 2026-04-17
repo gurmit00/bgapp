@@ -164,7 +164,7 @@ class _ImportScreenState extends State<ImportScreen> {
                         controller: _dataController,
                         maxLines: 10,
                         decoration: InputDecoration(
-                          hintText: 'Vendor Name\tProduct Name\tSKU\tPcs/Case\tPcs/Line\tPc Price\tCase Price\tPc Cost\tCase Cost\tMin Stock\tDefault Order\tVendor Phone',
+                          hintText: 'Vendor Name\tOrder List Name\tSKU\tPcs/Case\tPcs/Line\tPc Price\tCase Price\tPc Cost\tCase Cost\tMin Stock\tDefault Order\tVendor Phone',
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
                           ),
@@ -251,7 +251,7 @@ class _ImportScreenState extends State<ImportScreen> {
                                       : Text('${index + 1}', style: const TextStyle(fontSize: 12)),
                                 ),
                                 title: Text(
-                                  row['productName'] ?? 'Unknown Product',
+                                  row['orderListName'] ?? 'Unknown',
                                   style: TextStyle(
                                     fontWeight: FontWeight.w500,
                                     color: isDuplicate ? AppTheme.warningColor : null,
@@ -355,7 +355,7 @@ class _ImportScreenState extends State<ImportScreen> {
           ),
           const SizedBox(height: 4),
           _buildColumnRow('Vendor Name', 'Required - Name of the vendor'),
-          _buildColumnRow('Product Name', 'Required - Name of the product'),
+          _buildColumnRow('Order List Name', 'Required - Name shown on the order list'),
           const SizedBox(height: 8),
           Text(
             'Optional Columns:',
@@ -409,7 +409,7 @@ class _ImportScreenState extends State<ImportScreen> {
 
   // Expected fixed column order (0-indexed):
   // 0  Vendor
-  // 1  Product Name
+  // 1  Order List Name
   // 2  SKU
   // 3  Pcs Per Case
   // 4  Pcs Per Line
@@ -471,12 +471,12 @@ class _ImportScreenState extends State<ImportScreen> {
         if (i == 0 && _col(cols, 0).toLowerCase() == 'vendor') continue;
 
         final vendorName = _col(cols, 0);
-        final productName = _col(cols, 1);
-        if (vendorName.isEmpty || productName.isEmpty) continue;
+        final orderListName = _col(cols, 1);
+        if (vendorName.isEmpty || orderListName.isEmpty) continue;
 
         parsedData.add({
           'vendorName':   vendorName,
-          'productName':  productName,
+          'orderListName':  orderListName,
           'sku':          _col(cols, 2),
           'pcsPerCase':   int.tryParse(_col(cols, 3)) ?? 1,
           'pcsPerLine':   int.tryParse(_col(cols, 4)) ?? 1,
@@ -514,7 +514,7 @@ class _ImportScreenState extends State<ImportScreen> {
           for (var row in parsedData) {
             if ((row['vendorName'] as String).toLowerCase() != vName) continue;
             final isDup = existingProducts.any((p) =>
-                p.name.toLowerCase() == (row['productName'] as String).toLowerCase());
+                p.name.toLowerCase() == (row['orderListName'] as String).toLowerCase());
             if (isDup) {
               row['isDuplicate'] = true;
               duplicateCount++;
@@ -622,13 +622,13 @@ class _ImportScreenState extends State<ImportScreen> {
 
         // Create or update products for this vendor
         for (var productData in products) {
-          final productName = (productData['productName'] as String).trim();
+          final orderListName = (productData['orderListName'] as String).trim();
           final productSku = (productData['sku'] as String? ?? '').trim();
           final productSortOrder = productData['sortOrder'] as int? ?? 0;
 
           // Check if product already exists by name (exact match, same vendor)
           final existingProduct = existingProducts.where((existing) {
-            return existing.name.toLowerCase() == productName.toLowerCase();
+            return existing.name.toLowerCase() == orderListName.toLowerCase();
           }).firstOrNull;
 
           if (existingProduct != null) {
@@ -636,7 +636,8 @@ class _ImportScreenState extends State<ImportScreen> {
             final updated = Product(
               id: existingProduct.id,
               vendorId: vendorId,
-              name: productName,
+              name: orderListName,
+              orderListProductName: orderListName, // imported name is the order list name
               sku: productSku.isNotEmpty ? productSku : existingProduct.sku,
               pcsPerCase: productData['pcsPerCase'] as int? ?? 1,
               pcsPerLine: productData['pcsPerLine'] as int? ?? 1,
@@ -646,10 +647,7 @@ class _ImportScreenState extends State<ImportScreen> {
               onlineCasePrice: (productData['casePrice'] as num?)?.toDouble() ?? 0.0,
               pcCost: (productData['pcCost'] as num?)?.toDouble() ?? 0.0,
               caseCost: (productData['caseCost'] as num?)?.toDouble() ?? 0.0,
-              reorderRule: ReorderRule(
-                minStockPcs: productData['minStock'] as int? ?? 0,
-                defaultOrderQty: productData['defaultOrder'] as int? ?? 0,
-              ),
+              reorderRule: ReorderRule(maxStockPcs: productData['maxStock'] as int? ?? 0),
               sortOrder: productSortOrder,
               frontImageBase64: existingProduct.frontImageBase64,
               backImageBase64: existingProduct.backImageBase64,
@@ -657,14 +655,15 @@ class _ImportScreenState extends State<ImportScreen> {
             );
             await firebaseService.updateProduct(storeId, vendorId, updated);
             productsUpdated++;
-            updatedNames.add(productName);
+            updatedNames.add(orderListName);
             continue;
           }
 
           final product = Product(
             id: '${vendorId}_${DateTime.now().millisecondsSinceEpoch}_${productsCreated}',
             vendorId: vendorId,
-            name: productName,
+            name: orderListName,
+            orderListProductName: orderListName, // set on create so it's explicit in Firestore
             sku: productSku,
             pcsPerCase: productData['pcsPerCase'] as int? ?? 1,
             pcsPerLine: productData['pcsPerLine'] as int? ?? 1,
@@ -674,10 +673,7 @@ class _ImportScreenState extends State<ImportScreen> {
             onlineCasePrice: (productData['casePrice'] as num?)?.toDouble() ?? 0.0,
             pcCost: (productData['pcCost'] as num?)?.toDouble() ?? 0.0,
             caseCost: (productData['caseCost'] as num?)?.toDouble() ?? 0.0,
-            reorderRule: ReorderRule(
-              minStockPcs: productData['minStock'] as int? ?? 0,
-              defaultOrderQty: productData['defaultOrder'] as int? ?? 0,
-            ),
+            reorderRule: ReorderRule(maxStockPcs: productData['maxStock'] as int? ?? 0),
             sortOrder: productSortOrder,
             createdAt: DateTime.now(),
           );

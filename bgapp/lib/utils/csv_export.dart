@@ -57,29 +57,19 @@ class CsvExport {
     return rows.where((r) => r.product != null).length;
   }
 
-  /// Export UberEats CSV — uses ubereats_margins Firebase settings.
+  /// Export UberEats CSV — includes Section + Subsection columns from uber_sections settings.
   static Future<int> exportUberEats() => _exportPlatform(
     platformDocId:      'ubereats_margins',
     platformPriceLabel: 'Uber Price',
     filename:           '${_timestamp()}_ubereats.csv',
+    includeSections:    true,
   );
 
-  /// Export Instacart CSV — uses instacart_margins Firebase settings.
-  static Future<int> exportInstacart() => _exportPlatform(
-    platformDocId:      'instacart_margins',
-    platformPriceLabel: 'Instacart Price',
-    filename:           '${_timestamp()}_instacart.csv',
-  );
-
-  /// Shared export logic for any online platform.
-  static Future<int> _exportPlatform({
-    required String platformDocId,
-    required String platformPriceLabel,
-    required String filename,
-  }) async {
+  /// Export Instacart CSV — Instacart-specific column format.
+  static Future<int> exportInstacart() async {
     final results = await Future.wait([
       SyncService().getShopifyActiveProducts(),
-      _firebaseService.getPlatformMargins(platformDocId),
+      _firebaseService.getPlatformMargins('instacart_margins'),
     ]);
     final products    = results[0] as List<Map<String, dynamic>>;
     final marginsData = results[1] as Map<String, dynamic>;
@@ -92,26 +82,145 @@ class CsvExport {
 
     final buffer = StringBuffer();
     buffer.writeln([
-      'Handle', 'Product Name', 'SKU', 'Price', 'Margin %', platformPriceLabel, 'Tax Code', 'Tags', 'Image URL',
+      'aisles',           // shopify tags
+      'lookup_code',      // sku
+      'item_name',        // product name
+      'price',            // shopify price + margin%
+      'size',             // weight in grams e.g. "400 g"
+      'cost_unit',        // always "each"
+      'sale_price',       // blank
+      'sale_date_start',  // blank
+      'sale_date_end',    // blank
+      'product_image',    // shopify image url
+      'available',        // always "TRUE"
+      'tax',              // "TRUE" or "FALSE"
     ].map(_escapeCsv).join(','));
 
     for (final p in products) {
-      final taxable      = p['taxable'] as bool? ?? false;
-      final tags         = p['tags'] as String? ?? '';
-      final margin       = _resolveMargin(tags, defaultMargin, tagMargins);
-      final basePrice    = double.tryParse(p['price'] as String? ?? '0') ?? 0.0;
+      final taxable       = p['taxable'] as bool? ?? false;
+      final tags          = p['tags'] as String? ?? '';
+      final margin        = _resolveMargin(tags, defaultMargin, tagMargins);
+      final basePrice     = double.tryParse(p['price'] as String? ?? '0') ?? 0.0;
+      if (basePrice == 0) continue;
       final platformPrice = basePrice * (1 + margin / 100);
+      final weightGrams   = p['weightGrams'];
+      final sizeStr       = weightGrams != null && (weightGrams as num) > 0
+          ? '${weightGrams.toStringAsFixed(0)} g'
+          : '876 g';
+
       buffer.writeln([
-        p['handle']   ?? '',
-        p['title']    ?? '',
-        p['sku']      ?? '',
-        basePrice.toStringAsFixed(2),
-        margin.toStringAsFixed(1),
-        platformPrice.toStringAsFixed(2),
-        taxable ? '13' : '',
         tags,
+        p['sku']      ?? '',
+        p['title']    ?? '',
+        platformPrice.toStringAsFixed(2),
+        sizeStr,
+        'each',
+        '',   // sale_price
+        '',   // sale_date_start
+        '',   // sale_date_end
         p['imageUrl'] ?? '',
+        'TRUE',
+        taxable ? 'TRUE' : 'FALSE',
       ].map((v) => _escapeCsv(v.toString())).join(','));
+    }
+
+    final csv      = buffer.toString();
+    final dateStr  = DateFormat('yyyyMMdd').format(DateTime.now());
+    platform.downloadCsv(csv, '${dateStr}_1001_apnirootsMississauga_full.csv');
+    platform.downloadCsv(csv, '${dateStr}_1002_apnirootsOakville_full.csv');
+    return products.length;
+  }
+
+  /// Shared export logic for any online platform.
+  static Future<int> _exportPlatform({
+    required String platformDocId,
+    required String platformPriceLabel,
+    required String filename,
+    bool includeSections = false,
+  }) async {
+    final futures = <Future>[
+      SyncService().getShopifyActiveProducts(),
+      _firebaseService.getPlatformMargins(platformDocId),
+      if (includeSections) _firebaseService.getUberSections(),
+    ];
+    final results = await Future.wait(futures);
+    final products    = results[0] as List<Map<String, dynamic>>;
+    final marginsData = results[1] as Map<String, dynamic>;
+    final sectionsData = includeSections ? results[2] as Map<String, dynamic> : <String, dynamic>{};
+
+    if (products.isEmpty) throw Exception('No active Shopify products found.');
+
+    final defaultMargin = (marginsData['defaultMargin'] as num?)?.toDouble() ?? 20.0;
+    final rawTagMargins = (marginsData['tagMargins'] as Map<String, dynamic>?) ?? {};
+    final tagMargins    = rawTagMargins.map((k, v) => MapEntry(k, (v as num).toDouble()));
+
+    // Build tag → {section, subsection} lookup map
+    final tagToSection    = <String, String>{};
+    final tagToSubsection = <String, String>{};
+    if (includeSections) {
+      final rawEntries = (sectionsData['entries'] as List<dynamic>?) ?? [];
+      for (final e in rawEntries) {
+        final tag = (e['subsection'] as String? ?? '').trim();
+        if (tag.isNotEmpty) {
+          tagToSection[tag]    = (e['section']    as String? ?? '').trim();
+          tagToSubsection[tag] = tag;
+        }
+      }
+    }
+
+    final buffer = StringBuffer();
+
+    // UberEats uses a trimmed column set; Instacart keeps the full set.
+    if (includeSections) {
+      buffer.writeln([
+        'Handle', 'Product Name', 'Section', 'Subsection', 'Price', 'Tax Rate', 'Image URL', 'SKU',
+      ].map(_escapeCsv).join(','));
+    } else {
+      buffer.writeln([
+        'Handle', 'Product Name', 'SKU', 'Price', 'Margin %', platformPriceLabel, 'Tax Code', 'Tags', 'Image URL',
+      ].map(_escapeCsv).join(','));
+    }
+
+    for (final p in products) {
+      final taxable       = p['taxable'] as bool? ?? false;
+      final tags          = p['tags'] as String? ?? '';
+      final margin        = _resolveMargin(tags, defaultMargin, tagMargins);
+      final basePrice     = double.tryParse(p['price'] as String? ?? '0') ?? 0.0;
+      if (basePrice == 0) continue;
+      final platformPrice = basePrice * (1 + margin / 100);
+
+      if (includeSections) {
+        String section = '', subsection = '';
+        for (final tag in tags.split(',').map((t) => t.trim())) {
+          if (tagToSection.containsKey(tag)) {
+            section    = tagToSection[tag]!;
+            subsection = tagToSubsection[tag]!;
+            break;
+          }
+        }
+        buffer.writeln([
+          p['handle']  ?? '',
+          p['title']   ?? '',
+          section,
+          subsection,
+          platformPrice.toStringAsFixed(2),
+          taxable ? '13' : '',
+          p['imageUrl'] ?? '',
+          p['sku']     ?? '',
+        ].map((v) => _escapeCsv(v.toString())).join(','));
+      } else {
+        buffer.writeln([
+          p['handle']  ?? '',
+          p['title']   ?? '',
+          p['sku']     ?? '',
+          basePrice.toStringAsFixed(2),
+          margin.toStringAsFixed(1),
+          platformPrice.toStringAsFixed(2),
+          taxable ? '13' : '',
+          tags,
+          p['imageUrl'] ?? '',
+        ].map((v) => _escapeCsv(v.toString())).join(','));
+      }
     }
 
     platform.downloadCsv(buffer.toString(), filename);
@@ -164,8 +273,8 @@ class CsvExport {
         row.product?.casePrice.toStringAsFixed(2) ?? '',           // col 6
         row.product?.pcCost.toStringAsFixed(2) ?? '',              // col 7
         row.product?.caseCost.toStringAsFixed(2) ?? '',            // col 8
-        row.product?.reorderRule.minStockPcs.toString() ?? '',     // col 9
-        row.product?.reorderRule.defaultOrderQty.toString() ?? '', // col 10
+        row.product?.reorderRule.maxStockPcs.toString() ?? '',     // col 9 — max stock pcs
+        '',                                                        // col 10 — reserved
         '',                                                        // col 11 — On Hand blank on export
         '',                                                        // col 12 — Order Qty blank on export
         row.vendor.whatsappPhoneNumber,                            // col 13
@@ -320,8 +429,8 @@ class CsvExport {
             product.casePrice.toStringAsFixed(2),
             product.pcCost.toStringAsFixed(2),
             product.caseCost.toStringAsFixed(2),
-            product.reorderRule.minStockPcs.toString(),
-            product.reorderRule.defaultOrderQty.toString(),
+            product.reorderRule.maxStockPcs.toString(),
+            '',
             item?.onHandQtyPcs.toString() ?? '',
             item?.orderQtyCases.toString() ?? '',
           ].map(_escapeCsv).join(','));
@@ -349,8 +458,8 @@ class CsvExport {
             product?.casePrice.toStringAsFixed(2) ?? '',
             product?.pcCost.toStringAsFixed(2) ?? '',
             product?.caseCost.toStringAsFixed(2) ?? '',
-            product?.reorderRule.minStockPcs.toString() ?? '',
-            product?.reorderRule.defaultOrderQty.toString() ?? '',
+            product?.reorderRule.maxStockPcs.toString() ?? '',
+            '',
             item.onHandQtyPcs.toString(),
             item.orderQtyCases.toString(),
           ].map(_escapeCsv).join(','));

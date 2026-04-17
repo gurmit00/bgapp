@@ -19,6 +19,7 @@
 /// │ edit_product             │ Save button on Product Hub (edit product fields) │  ✓    │         │       │       ✓         │
 /// │ export_ubereats          │ Export UberEats CSV (Online Platforms menu)      │  ✓    │         │       │                 │
 /// │ uber_markup              │ Uber Markup settings screen (Online Platforms)   │  ✓    │         │       │                 │
+/// │ uber_sections            │ Uber Sections management screen                  │  ✓    │         │       │                 │
 /// │ export_instacart         │ Export Instacart CSV (Online Platforms menu)     │  ✓    │         │       │                 │
 /// │ instacart_markup         │ Instacart Markup settings screen                 │  ✓    │         │       │                 │
 /// ├──────────────────────────┼──────────────────────────────────────────────────┼───────┼─────────┼───────┼─────────────────┤
@@ -57,6 +58,7 @@ class AppRoles {
   static const String editProduct    = 'edit_product';
   static const String exportUberEats    = 'export_ubereats';   // Export UberEats CSV
   static const String uberMarkup        = 'uber_markup';        // Uber Markup settings screen
+  static const String uberSections      = 'uber_sections';      // Uber Sections management screen
   static const String exportInstacart   = 'export_instacart';  // Export Instacart CSV
   static const String instacartMarkup   = 'instacart_markup';  // Instacart Markup settings screen
 
@@ -78,6 +80,7 @@ class AppRoles {
       editProduct,    // Save button on Product Hub
       exportUberEats,  // Export UberEats CSV
       uberMarkup,      // Uber Markup settings screen
+      uberSections,    // Uber Sections management screen
       exportInstacart, // Export Instacart CSV
       instacartMarkup, // Instacart Markup settings screen
     ],

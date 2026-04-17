@@ -396,8 +396,8 @@ class _ProductSyncScreenState extends State<ProductSyncScreen> {
         'departmentName': p.posDepartmentName,
         'vendor': _selectedVendor?.name ?? '',
         'taxCode': p.posTaxCode,
-        'reorderLevel': p.reorderRule.minStockPcs.toString(),
-        'reorderQty': p.reorderRule.defaultOrderQty.toString(),
+        'reorderLevel': p.reorderRule.maxStockPcs.toString(),
+        'reorderQty': '0',
       }).toList();
 
       final csv = await SyncService().generatePosImport(productsData);

@@ -543,26 +543,22 @@ class Vendor {
     );
   }
 }class ReorderRule {
-  final int minStockPcs;
-  final int defaultOrderQty;
+  final int maxStockPcs;
 
-  ReorderRule({
-    required this.minStockPcs,
-    required this.defaultOrderQty,
-  });
+  ReorderRule({this.maxStockPcs = 0});
 
-  Map<String, dynamic> toMap() {
-    return {
-      'minStockPcs': minStockPcs,
-      'defaultOrderQty': defaultOrderQty,
-    };
+  /// Cases to order: floor((max - onHand) / pcsPerCase), 0 = no order needed.
+  int suggestedCases(int onHandPcs, int pcsPerCase) {
+    if (maxStockPcs <= 0 || pcsPerCase <= 0) return 0;
+    final room = maxStockPcs - onHandPcs;
+    if (room <= 0) return 0;
+    return room ~/ pcsPerCase;
   }
 
+  Map<String, dynamic> toMap() => {'maxStockPcs': maxStockPcs};
+
   factory ReorderRule.fromMap(Map<String, dynamic> map) {
-    return ReorderRule(
-      minStockPcs: map['minStockPcs'] ?? 0,
-      defaultOrderQty: map['defaultOrderQty'] ?? 0,
-    );
+    return ReorderRule(maxStockPcs: (map['maxStockPcs'] ?? 0) as int);
   }
 }
 
@@ -720,7 +716,7 @@ class Product {
       backImageBase64: map['backImageBase64'] ?? '',
       reorderRule: map['reorderRule'] != null
           ? ReorderRule.fromMap(map['reorderRule'])
-          : ReorderRule(minStockPcs: 0, defaultOrderQty: 0),
+          : ReorderRule(),
       sortOrder: map['sortOrder'] ?? 0,
       createdAt: map['createdAt'] != null
           ? DateTime.parse(map['createdAt'])

@@ -60,7 +60,7 @@ class ProductHubScreen extends StatefulWidget {
   /// The active product (first ref in multi-store, or the single product, or empty for lookup)
   Product get activeProduct {
     if (isLookupMode) {
-      return Product(id: '', vendorId: '', name: '', orderListProductName: lookupOrderListProductName ?? '', sku: lookupSku!, pcsPerCase: 0, pcsPerLine: 1, reorderRule: ReorderRule(minStockPcs: 0, defaultOrderQty: 0), createdAt: DateTime.now());
+      return Product(id: '', vendorId: '', name: '', orderListProductName: lookupOrderListProductName ?? '', sku: lookupSku!, pcsPerCase: 0, pcsPerLine: 1, reorderRule: ReorderRule(), createdAt: DateTime.now());
     }
     return crossStoreProduct != null ? crossStoreProduct!.refs.first.product : product!;
   }
@@ -101,8 +101,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
   late TextEditingController _onlineCasePriceController;
   late TextEditingController _pcCostController;
   late TextEditingController _caseCostController;
-  late TextEditingController _minStockController;
-  late TextEditingController _defaultOrderQtyController;
+  late TextEditingController _maxStockController;
 
   // ── Image state ──
   String _frontImageBase64 = '';
@@ -181,8 +180,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     _onlineCasePriceController = TextEditingController(text: p.onlineCasePrice.toString());
     _pcCostController = TextEditingController(text: p.pcCost.toString());
     _caseCostController = TextEditingController(text: p.caseCost.toString());
-    _minStockController = TextEditingController(text: p.reorderRule.minStockPcs.toString());
-    _defaultOrderQtyController = TextEditingController(text: p.reorderRule.defaultOrderQty.toString());
+    _maxStockController = TextEditingController(text: p.reorderRule.maxStockPcs.toString());
   }
 
   @override
@@ -197,8 +195,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
     _onlineCasePriceController.dispose();
     _pcCostController.dispose();
     _caseCostController.dispose();
-    _minStockController.dispose();
-    _defaultOrderQtyController.dispose();
+    _maxStockController.dispose();
     super.dispose();
   }
 
@@ -217,8 +214,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
       _caseCostController.text = '0';
       _pcsPerCaseController.text = '0';
       _pcsPerLineController.text = '1';
-      _minStockController.text = '0';
-      _defaultOrderQtyController.text = '0';
+      _maxStockController.text = '0';
       _posTaxCode     = '1';
       _posDepartmentName = '';
       _shopifyTags = [];
@@ -1387,7 +1383,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
 
           // ── Reorder Rules ──
           _priceSubHeader('REORDER', Icons.autorenew_rounded, DS.subLabel),
-          _gridDoubleRow('Min Stock (pcs)', _minStockController, 'Default Order (cs)', _defaultOrderQtyController, isNumber: true),
+          _gridRow('Max Stock (pcs)', child: _gridInput(_maxStockController, keyboardType: TextInputType.number, textAlign: TextAlign.right)),
 
           // ── Mapping Confirmed ──
           Container(
@@ -2039,8 +2035,8 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
           'departmentName': _posDepartmentName,
           'vendor': widget.activeVendor.name,
           'taxCode': _posTaxCode,
-          'reorderLevel': _minStockController.text.trim(),
-          'reorderQty': _defaultOrderQtyController.text.trim(),
+          'reorderLevel': _maxStockController.text.trim(),
+          'reorderQty': '0',
           'storeId': targetStore.id,
           'storeName': targetStore.name,
         },
@@ -2200,10 +2196,7 @@ class _ProductHubScreenState extends State<ProductHubScreen> {
       shopifyImageUrl: widget.activeProduct.shopifyImageUrl,
       frontImageBase64: _frontImageBase64,
       backImageBase64: _backImageBase64,
-      reorderRule: ReorderRule(
-        minStockPcs: int.tryParse(_minStockController.text) ?? 0,
-        defaultOrderQty: int.tryParse(_defaultOrderQtyController.text) ?? 0,
-      ),
+      reorderRule: ReorderRule(maxStockPcs: int.tryParse(_maxStockController.text) ?? 0),
       sortOrder: widget.activeProduct.sortOrder,
       createdAt: widget.activeProduct.createdAt,
     );

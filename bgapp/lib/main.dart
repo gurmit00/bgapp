@@ -16,6 +16,7 @@ import 'package:newstore_ordering_app/screens/product_sync_screen.dart';
 import 'package:newstore_ordering_app/screens/shopify_missing_screen.dart';
 import 'package:newstore_ordering_app/screens/pending_approval_screen.dart';
 import 'package:newstore_ordering_app/screens/platform_markup_screen.dart';
+import 'package:newstore_ordering_app/screens/uber_sections_screen.dart';
 import 'package:newstore_ordering_app/providers/plu_provider.dart';
 import 'package:newstore_ordering_app/services/firebase_service.dart';
 import 'package:newstore_ordering_app/services/sync_service.dart';
@@ -71,6 +72,7 @@ class MyApp extends StatelessWidget {
                 title: 'Uber Markup', platformDocId: 'ubereats_margins'),
           '/instacart-markup': (context) => const PlatformMarkupScreen(
                 title: 'Instacart Markup', platformDocId: 'instacart_margins'),
+          '/uber-sections': (context) => const UberSectionsScreen(),
           '/product-sync': (context) => const ProductSyncScreen(),
           '/store': (context) {
             final store = ModalRoute.of(context)?.settings.arguments as Store;

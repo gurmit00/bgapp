@@ -6,6 +6,7 @@ import 'package:newstore_ordering_app/models/models.dart';
 import 'package:newstore_ordering_app/providers/app_providers.dart';
 import 'package:newstore_ordering_app/services/firebase_service.dart';
 import 'package:newstore_ordering_app/utils/theme.dart';
+import 'package:newstore_ordering_app/utils/fuzzy_search.dart';
 import 'package:intl/intl.dart';
 
 class OrderCreationScreen extends StatefulWidget {
@@ -97,11 +98,8 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
 
   void _applyReorderRule(Product p) {
     final onHand = int.tryParse(_getOnHandController(p).text) ?? 0;
-    if (p.reorderRule.minStockPcs > 0 && onHand < p.reorderRule.minStockPcs) {
-      _getOrderQtyController(p).text = p.reorderRule.defaultOrderQty.toString();
-    } else {
-      _getOrderQtyController(p).text = '0';
-    }
+    final cases = p.reorderRule.suggestedCases(onHand, p.pcsPerCase);
+    _getOrderQtyController(p).text = cases > 0 ? cases.toString() : '0';
     setState(() {});
   }
 
@@ -178,13 +176,13 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
           final products = productProvider.products;
           // Build indexed list so original row numbers are preserved when searching
           final indexed = products.asMap().entries.toList(); // {index, product}
-          final filtered = _searchQuery.isEmpty
+          final filtered = _searchQuery.trim().isEmpty
               ? indexed
               : indexed.where((e) {
-                  final name = e.value.orderListProductName.isNotEmpty
+                  final haystack = e.value.orderListProductName.isNotEmpty
                       ? e.value.orderListProductName
                       : e.value.name;
-                  return name.toLowerCase().contains(_searchQuery.toLowerCase());
+                  return smartMatch(_searchQuery, haystack);
                 }).toList();
 
           if (products.isEmpty) {
@@ -241,13 +239,13 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                   ),
                   child: TextField(
                     controller: _searchController,
-                    onChanged: (v) => setState(() => _searchQuery = v.trim()),
+                    onChanged: (v) => setState(() => _searchQuery = v),
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
                       hintText: 'Search by product name…',
                       hintStyle: TextStyle(fontSize: 13, color: AppTheme.textTertiary),
                       prefixIcon: const Icon(Icons.search, size: 18),
-                      suffixIcon: _searchQuery.isNotEmpty
+                      suffixIcon: _searchQuery.trim().isNotEmpty
                           ? IconButton(
                               icon: const Icon(Icons.close, size: 16),
                               onPressed: () {
@@ -324,28 +322,14 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                               Expanded(
                                 child: GestureDetector(
                                   onTap: () async {
-                                    if (product.sku.isNotEmpty) {
-                                      final stores = context.read<StoreProvider>().stores;
-                                      await Navigator.of(context).pushNamed(
-                                        '/product-lookup',
-                                        arguments: {
-                                          'sku': product.sku,
-                                          'allStores': stores,
-                                          'orderListProductName': product.orderListProductName.isNotEmpty
-                                              ? product.orderListProductName
-                                              : product.name,
-                                        },
-                                      );
-                                    } else {
-                                      await Navigator.of(context).pushNamed(
-                                        '/product',
-                                        arguments: {
-                                          'product': product,
-                                          'store': widget.store,
-                                          'vendor': widget.vendor,
-                                        },
-                                      );
-                                    }
+                                    await Navigator.of(context).pushNamed(
+                                      '/product',
+                                      arguments: {
+                                        'product': product,
+                                        'store': widget.store,
+                                        'vendor': widget.vendor,
+                                      },
+                                    );
                                     if (mounted) {
                                       context.read<ProductProvider>().loadProductsByVendor(widget.store.id, widget.vendor.id);
                                     }
@@ -396,19 +380,19 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                                                 ),
                                               ),
                                             // Reorder rule — always show
-                                            if (product.reorderRule.minStockPcs > 0)
+                                            if (product.reorderRule.maxStockPcs > 0)
                                               Container(
                                                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                                                 decoration: BoxDecoration(
-                                                  color: const Color(0xFFD1FAE5), // Emerald 100
+                                                  color: const Color(0xFFD1FAE5),
                                                   borderRadius: BorderRadius.circular(3),
                                                 ),
                                                 child: Text(
-                                                  'Min ${product.reorderRule.minStockPcs}  ▸  ${product.reorderRule.defaultOrderQty} cs',
+                                                  'Max ${product.reorderRule.maxStockPcs} pcs',
                                                   style: const TextStyle(
                                                     fontSize: 10,
                                                     fontWeight: FontWeight.w700,
-                                                    color: Color(0xFF047857), // Emerald 700
+                                                    color: Color(0xFF047857),
                                                   ),
                                                 ),
                                               )
@@ -695,7 +679,7 @@ class _OrderCreationScreenState extends State<OrderCreationScreen> {
                   sku: '',
                   pcsPerCase: 1, pcsPerLine: 1,
                   storePrice: 0, onlinePrice: 0, storeCasePrice: 0, onlineCasePrice: 0, pcCost: 0, caseCost: 0,
-                  reorderRule: ReorderRule(minStockPcs: 0, defaultOrderQty: 0),
+                  reorderRule: ReorderRule(),
                   createdAt: DateTime.now(),
                 );
                 context.read<ProductProvider>().addProduct(widget.store.id, widget.vendor.id, product);

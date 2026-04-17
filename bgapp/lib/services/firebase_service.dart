@@ -130,7 +130,11 @@ class FirebaseService {
   Future<List<Store>> getStores() async {
     try {
       final snapshot = await _firestore.collection('stores').get();
-      return snapshot.docs.map((doc) => Store.fromMap(doc.data())).toList();
+      return snapshot.docs.map((doc) {
+        final data = doc.data();
+        data['id'] = doc.id;
+        return Store.fromMap(data);
+      }).toList();
     } catch (e) {
       print('Error fetching stores: $e');
       return [];
@@ -172,7 +176,11 @@ class FirebaseService {
           .collection('vendors')
           .orderBy('name')
           .get();
-      return snapshot.docs.map((doc) => Vendor.fromMap(doc.data())).toList();
+      return snapshot.docs.map((doc) {
+        final data = doc.data();
+        data['id'] = doc.id;
+        return Vendor.fromMap(data);
+      }).toList();
     } catch (e) {
       print('Error fetching vendors for store $storeId: $e');
       return [];
@@ -241,7 +249,11 @@ class FirebaseService {
           .doc(vendorId)
           .collection('products')
           .get();
-      return snapshot.docs.map((doc) => Product.fromMap(doc.data())).toList();
+      return snapshot.docs.map((doc) {
+        final data = doc.data();
+        data['id'] = doc.id;
+        return Product.fromMap(data);
+      }).toList();
     } catch (e) {
       print('Error fetching products: $e');
       return [];
@@ -289,6 +301,25 @@ class FirebaseService {
     });
   }
 
+  // ── Uber sections (section → subsection/tag mapping) ────────
+  // Stored in Firestore: settings/uber_sections → { entries: [{section, subsection}] }
+
+  Future<Map<String, dynamic>> getUberSections() async {
+    try {
+      final doc = await _firestore.collection('settings').doc('uber_sections').get();
+      if (doc.exists) return doc.data() ?? {};
+    } catch (e) {
+      print('Error getting uber sections: $e');
+    }
+    return {};
+  }
+
+  Future<void> saveUberSections(List<Map<String, String>> entries) async {
+    await _firestore.collection('settings').doc('uber_sections').set({
+      'entries': entries,
+    });
+  }
+
   Future<void> updateProductFields(String storeId, String vendorId, String productId, Map<String, dynamic> fields) async {
     try {
       await _firestore
@@ -302,18 +333,14 @@ class FirebaseService {
   }
 
   Future<void> updateProduct(String storeId, String vendorId, Product product) async {
-    try {
-      await _firestore
-          .collection('stores')
-          .doc(storeId)
-          .collection('vendors')
-          .doc(vendorId)
-          .collection('products')
-          .doc(product.id)
-          .update(product.toMap());
-    } catch (e) {
-      print('Error updating product: $e');
-    }
+    await _firestore
+        .collection('stores')
+        .doc(storeId)
+        .collection('vendors')
+        .doc(vendorId)
+        .collection('products')
+        .doc(product.id)
+        .update(product.toMap());
   }
 
   Future<void> deleteProduct(String storeId, String vendorId, String productId) async {
